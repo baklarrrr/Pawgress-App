@@ -4,11 +4,11 @@ import csv
 import random
 import sqlite3
 from datetime import datetime, timedelta
-from PyQt6.QtCore import Qt, QDateTime, QDate
-from PyQt6.QtGui import QColor, QDoubleValidator, QPainter, QPen
+from PyQt6.QtCore import Qt, QDateTime, QDate, QPoint
+from PyQt6.QtGui import QColor, QDoubleValidator, QPainter, QPen, QPixmap, QPolygon, QIcon
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QMessageBox, QTabWidget, QDateEdit, QComboBox)
+                             QHeaderView, QMessageBox, QTabWidget, QDateEdit, QComboBox, QDialog, QDialogButtonBox)
 from PyQt6.QtCharts import (QChart, QChartView, QLineSeries, QDateTimeAxis, QValueAxis,
                             QBarSeries, QBarSet, QBarCategoryAxis, QScatterSeries)
 
@@ -175,6 +175,57 @@ class NutritionChart(QChart):
 
 # ================= MAIN APP =================
 class KittenTracker(QMainWindow):
+
+    def generate_random_icon(self):
+        """Create a QIcon with random emoji combination"""
+        # Create a pixmap to draw on
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Random background shape
+        bg_color = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        painter.setBrush(bg_color)
+        
+        shape_choice = random.choice(["circle", "square", "triangle"])
+        if shape_choice == "circle":
+            painter.drawEllipse(4, 4, 56, 56)
+        elif shape_choice == "square":
+            painter.drawRoundedRect(4, 4, 56, 56, 12, 12)
+        else:  # triangle
+            poly = QPolygon([QPoint(32, 8), QPoint(58, 56), QPoint(6, 56)])
+            painter.drawPolygon(poly)
+
+        # Random emoji combination
+        emojis = random.sample([
+            "😺", "🐾", "🐱", "🎀", "🦴", "🍗", "🐟", "🥛",
+            "🌟", "⚡", "❤️", "🌈", "🍎", "🐭", "🧶", "🎈"
+        ], 2)
+        
+        # Draw emojis
+        font = painter.font()
+        font.setPointSize(24)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255))
+        
+        for i, emoji in enumerate(emojis):
+            painter.drawText(
+                random.randint(8, 32),
+                random.randint(32, 48) + i*16,
+                emoji
+            )
+        
+        painter.end()
+        return QIcon(pixmap)
+
+    def random_window_title(self):
+        """Generate fun random window title"""
+        adjectives = ["Fluffy", "Playful", "Majestic", "Cuddly", "Adorable"]
+        nouns = ["Companion", "Friend", "Pal", "Buddy", "Maine Coon"]
+        return f"{random.choice(adjectives)} {random.choice(nouns)} Tracker 🐾"
+
     def __init__(self):
         super().__init__()
         self.db = KittenDatabase()
@@ -183,6 +234,10 @@ class KittenTracker(QMainWindow):
         self.setup_ui()
         self.load_data()
         self.toggle_dev_mode(False)
+
+        # Set random icon and title
+        self.setWindowIcon(self.generate_random_icon())
+        self.setWindowTitle(self.random_window_title())
 
     def export_data(self):
         animal_id = self.current_animal_id()
@@ -289,6 +344,11 @@ class KittenTracker(QMainWindow):
         self.dev_mode = dev_menu.addAction("Development Mode")
         self.dev_mode.setCheckable(True)
         self.dev_mode.triggered.connect(lambda: self.toggle_dev_mode(self.dev_mode.isChecked()))
+        self.randomize_ui = dev_menu.addAction("Randomize UI")
+        self.randomize_ui.triggered.connect(lambda: [
+            self.setWindowIcon(self.generate_random_icon()),
+            self.setWindowTitle(self.random_window_title())
+        ])
 
     def _create_table(self, headers):
         table = QTableWidget()
@@ -400,6 +460,7 @@ class KittenTracker(QMainWindow):
         type_input = QComboBox()
         type_input.addItems(["Cat", "Dog", "Other"])
         birthdate_input = QDateEdit(calendarPopup=True)
+        birthdate_input.setDate(QDate.currentDate())
         
         # Buttons
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
