@@ -12,6 +12,17 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCharts import (QChart, QChartView, QLineSeries, QDateTimeAxis, QValueAxis,
                             QBarSeries, QBarSet, QBarCategoryAxis, QScatterSeries)
 
+class DateTimeTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text):
+        super().__init__(text)
+        try:
+            self.sort_value = QDateTime.fromString(text, "yyyy-MM-dd HH:mm:ss")
+        except:
+            self.sort_value = QDateTime.currentDateTime()
+
+    def __lt__(self, other):
+        return self.sort_value < other.sort_value
+
 # ================= DATABASE =================
 class KittenDatabase:
     def __init__(self):
@@ -291,6 +302,7 @@ class KittenTracker(QMainWindow):
         weight_tab = QWidget()
         form = QHBoxLayout()
         self.date_input = QDateEdit(calendarPopup=True)
+        self.date_input.setDate(QDate.currentDate())
         self.weight_input = QLineEdit(placeholderText="Weight")
         self.weight_input.setValidator(QDoubleValidator(0.1, 99.9, 2))
         self.notes_input = QLineEdit(placeholderText="Notes")
@@ -356,6 +368,7 @@ class KittenTracker(QMainWindow):
         table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         table.setStyleSheet("background: #2E2E2E;")
+        table.setSortingEnabled(True)  # 👈 Enable sorting
         return table
 
     def _create_card(self, title, value, color):
@@ -384,11 +397,21 @@ class KittenTracker(QMainWindow):
                 self.weight_table.setItem(self.weight_table.rowCount()-1, col, QTableWidgetItem(str(val)))
 
         # Load diet data
+        self.diet_table.setSortingEnabled(False)  # Disable during update
         diet_logs = self.db.get_diet_logs(animal_id)
         for row in diet_logs:
             self.diet_table.insertRow(self.diet_table.rowCount())
             for col, val in enumerate(row):
-                self.diet_table.setItem(self.diet_table.rowCount()-1, col, QTableWidgetItem(str(val)))
+                if col == 0:  # Timestamp column
+                    item = DateTimeTableWidgetItem(str(val))
+                else:
+                    item = QTableWidgetItem(str(val))
+                self.diet_table.setItem(self.diet_table.rowCount()-1, col, item)
+
+        # Enable sorting and set default order
+        self.diet_table.setSortingEnabled(True)
+        if diet_logs:
+            self.diet_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
 
         # Update charts
         self.growth_chart.chart().update_chart(weight_data, self.unit)
