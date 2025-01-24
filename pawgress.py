@@ -111,7 +111,101 @@ class KittenDatabase:
         self._exec("DELETE FROM weight_data")
         self._exec("DELETE FROM diet_logs")
 
-# ================= CHARTS (PARTIAL) =================
+# ================= CHARTS =================
+class HealthCorrelationChart(QChart):
+    def __init__(self):
+        super().__init__()
+        self.setTheme(QChart.ChartTheme.ChartThemeDark)
+        self.setTitle("Nutrition vs Weight Correlation")
+        
+        self.scatter = QScatterSeries()
+        self.scatter.setName("Daily Data")
+        self.scatter.setColor(QColor("#FFA726"))
+        self.scatter.setMarkerSize(12)
+        self.scatter.setBorderColor(QColor(0,0,0,0))
+        
+        self.trend = QLineSeries()
+        self.trend.setName("Trend Line")
+        self.trend.setPen(QPen(QColor("#7E57C2"), 2, Qt.PenStyle.DashLine))
+        
+        self.addSeries(self.scatter)
+        self.addSeries(self.trend)
+        
+        # Axes
+        self.x_axis = QValueAxis()
+        self.y_axis = QValueAxis()
+        self.x_axis.setTitleText("Daily Nutrition (g)")
+        self.y_axis.setTitleText("Weight Change (%)")
+        self.x_axis.setLabelFormat("%.0f")
+        self.y_axis.setLabelFormat("%.1f%%")
+        
+        self.addAxis(self.x_axis, Qt.AlignmentFlag.AlignBottom)
+        self.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
+        
+        self.scatter.attachAxis(self.x_axis)
+        self.scatter.attachAxis(self.y_axis)
+        self.trend.attachAxis(self.x_axis)
+        self.trend.attachAxis(self.y_axis)
+
+    def update_chart(self, nutrition_data, weight_data):
+        self.scatter.clear()
+        self.trend.clear()
+        
+        if not nutrition_data or len(weight_data) < 2:
+            self.x_axis.setRange(0, 100)
+            self.y_axis.setRange(-5, 5)
+            return
+
+        # Create weight timeline with interpolation
+        weight_dict = {}
+        dates = [datetime.strptime(d[0], "%Y-%m-%d") for d in weight_data]
+        weights = [d[1] for d in weight_data]
+        
+        # Calculate daily weight changes
+        weight_changes = {}
+        for i in range(1, len(dates)):
+            days_between = (dates[i] - dates[i-1]).days
+            if days_between == 0:
+                continue
+            daily_change = (weights[i] - weights[i-1])/weights[i-1]/days_between
+            for d in range(days_between):
+                current_date = dates[i-1] + timedelta(days=d)
+                weight_changes[current_date] = daily_change * 100  # Percentage
+
+        # Correlate nutrition with weight changes
+        plot_data = []
+        for nut_date_str, nut_total in nutrition_data:
+            nut_date = datetime.strptime(nut_date_str, "%Y-%m-%d")
+            if nut_date in weight_changes:
+                plot_data.append((float(nut_total), weight_changes[nut_date]))
+
+        if not plot_data:
+            return
+
+        x_vals = [d[0] for d in plot_data]
+        y_vals = [d[1] for d in plot_data]
+        
+        for x, y in plot_data:
+            self.scatter.append(x, y)
+
+        if len(x_vals) > 1:
+            # Trend line calculation
+            coeffs = np.polyfit(x_vals, y_vals, 1)
+            trend_func = np.poly1d(coeffs)
+            min_x, max_x = min(x_vals), max(x_vals)
+            self.trend.append(min_x, trend_func(min_x))
+            self.trend.append(max_x, trend_func(max_x))
+            
+            # Dynamic axis ranges
+            x_pad = (max_x - min_x) * 0.1
+            y_pad = (max(y_vals) - min(y_vals)) * 0.2
+            self.x_axis.setRange(min_x - x_pad, max_x + x_pad)
+            self.y_axis.setRange(min(y_vals)-y_pad, max(y_vals)+y_pad)
+            
+            # Correlation coefficient
+            correlation = np.corrcoef(x_vals, y_vals)[0,1]
+            self.setTitle(f"Nutrition vs Weight Change (r = {correlation:.2f})")
+
 class GrowthChart(QChart):
     def __init__(self):
         super().__init__()
@@ -336,8 +430,15 @@ class KittenTracker(QMainWindow):
         chart_layout = QHBoxLayout()
         self.growth_chart = QChartView(GrowthChart())
         self.nutrition_chart = QChartView(NutritionChart())
+        self.health_chart = QChartView(HealthCorrelationChart())  # New chart
+        
+        # Set chart sizes
+        for chart in [self.growth_chart, self.nutrition_chart, self.health_chart]:
+            chart.setMinimumSize(400, 300)
+        
         chart_layout.addWidget(self.growth_chart)
         chart_layout.addWidget(self.nutrition_chart)
+        chart_layout.addWidget(self.health_chart)
 
         layout.addLayout(stats)
         layout.addLayout(chart_layout)
@@ -465,6 +566,7 @@ class KittenTracker(QMainWindow):
             self.growth_chart.chart().update_chart(weight_data, self.unit)
             nutrition_data = self.db.get_daily_nutrition(animal_id)
             self.nutrition_chart.chart().update_chart(nutrition_data, self.nutrition_goal)
+            self.health_chart.chart().update_chart(nutrition_data, weight_data)
 
             # Update stats
             if weight_data:
