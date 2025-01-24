@@ -1,11 +1,14 @@
 import os
 import numpy as np
+import subprocess
 import sys
 import csv
 import random
 import sqlite3
+import platform
+from pathlib import Path
 from datetime import datetime, timedelta
-from PyQt6.QtCore import Qt, QDateTime, QDate, QPoint
+from PyQt6.QtCore import Qt, QDateTime, QDate, QPoint, QTimer
 from PyQt6.QtGui import (
     QColor, QDoubleValidator, QPainter, QPen, 
     QPixmap, QPolygon, QIcon, QCursor
@@ -34,26 +37,31 @@ class DateTimeTableWidgetItem(QTableWidgetItem):
 
 # ================= DATABASE =================
 class KittenDatabase:
-    def __init__(self):
-        self.conn = sqlite3.connect('kitten_tracker.db')
-        self._exec("PRAGMA foreign_keys = ON")
-        self._exec("PRAGMA journal_mode = WAL")
-        self._create_tables()
-        
-    def _create_tables(self):
-        self._exec('''CREATE TABLE IF NOT EXISTS animals 
-                    (id INTEGER PRIMARY KEY, name TEXT, 
-                     animal_type TEXT, birthdate TEXT)''')
-        self._exec('''CREATE TABLE IF NOT EXISTS weight_data 
-                    (id INTEGER PRIMARY KEY, animal_id INTEGER, date TEXT, 
-                     weight REAL, notes TEXT, UNIQUE(animal_id, date),
-                     FOREIGN KEY(animal_id) REFERENCES animals(id))''')
-        self._exec('''CREATE TABLE IF NOT EXISTS diet_logs 
-                    (id INTEGER PRIMARY KEY, animal_id INTEGER, timestamp TEXT,
-                     meal_type TEXT, food_item TEXT, amount REAL,
-                     FOREIGN KEY(animal_id) REFERENCES animals(id))''')
-        self._exec("CREATE INDEX IF NOT EXISTS idx_weight ON weight_data(animal_id, date)")
-        self._exec("CREATE INDEX IF NOT EXISTS idx_meals ON diet_logs(animal_id, timestamp)")
+    def __init__(self, production=True):
+        self.production = production
+        try:
+            if platform.system() == "Windows":
+                app_data = Path.home() / "AppData" / "Local" / "KittenTracker"
+            elif platform.system() == "Darwin":
+                app_data = Path.home() / "Library" / "Application Support" / "KittenTracker"
+            else:
+                app_data = Path.home() / ".local" / "share" / "KittenTracker"
+
+            app_data.mkdir(parents=True, exist_ok=True)
+            db_name = "kitten_tracker_prod.db" if production else "kitten_tracker_dev.db"
+            self.db_path = app_data / db_name
+            self.backup_dir = app_data / "backups"
+            self.backup_dir.mkdir(exist_ok=True)
+
+            self.conn = sqlite3.connect(self.db_path)
+            self._exec("PRAGMA foreign_keys = ON;")
+            self._create_tables()
+            self._migrate_old_data()
+            self._migrate_schema()
+        except Exception as e:
+            QMessageBox.critical(None, "Fatal Error", f"Failed to initialize database: {str(e)}")
+            sys.exit(1)
+
 
     def _exec(self, query, params=()):
         try:
@@ -66,50 +74,113 @@ class KittenDatabase:
             QMessageBox.warning(None, "Database Error", f"Operation failed: {str(e)}")
             return False
 
-    def create_backup(self):
-        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
-        try:
-            self.conn.execute(f"VACUUM INTO '{backup_name}'")
-            return True
-        except sqlite3.Error as e:
-            QMessageBox.warning(None, "Backup Failed", str(e))
-            return False
+    def _create_tables(self):
+        self._exec("""
+            CREATE TABLE IF NOT EXISTS animals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                animal_type TEXT,
+                birthdate DATE
+            )""")
+        self._exec("""
+            CREATE TABLE IF NOT EXISTS weight_data (
+                animal_id INTEGER REFERENCES animals(id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                weight REAL NOT NULL,
+                notes TEXT,
+                UNIQUE(animal_id, date)
+            )""")
+        self._exec("""
+            CREATE TABLE IF NOT EXISTS diet_logs (
+                animal_id INTEGER REFERENCES animals(id) ON DELETE CASCADE,
+                timestamp DATETIME NOT NULL,
+                meal_type TEXT,
+                food_item TEXT,
+                amount REAL,
+                notes TEXT
+            )""")
 
-    def get_weight_data(self, animal_id):
-        return self.conn.cursor().execute(
-            "SELECT date, weight, notes FROM weight_data WHERE animal_id=? ORDER BY date",
-            (animal_id,)
-        ).fetchall()
-    
-    def get_daily_nutrition(self, animal_id):
-        return self.conn.cursor().execute(
-            "SELECT DATE(timestamp), ROUND(SUM(amount), 1) "  # Fixed column alias
-            "FROM diet_logs WHERE animal_id=? GROUP BY DATE(timestamp) ORDER BY DATE(timestamp)",
-            (animal_id,)
-        ).fetchall()
+    def _migrate_old_data(self):
+        old_path = Path("kitten_tracker.db")
+        if old_path.exists():
+            try:
+                old_conn = sqlite3.connect(old_path)
+                old_data = old_conn.execute("SELECT * FROM animals").fetchall()
+                for row in old_data:
+                    self._exec(
+                        "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
+                        (row[1], row[2], row[3])
+                    )
+                old_path.unlink()
+            except Exception as e:
+                print(f"Migration failed: {str(e)}")
 
-    def get_diet_logs(self, animal_id):
-        return self.conn.cursor().execute(
-            "SELECT timestamp, meal_type, food_item, amount FROM diet_logs WHERE animal_id=? ORDER BY timestamp",
-            (animal_id,)
-        ).fetchall()
+    def _migrate_schema(self):
+        cursor = self.conn.execute("PRAGMA table_info(diet_logs)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'notes' not in columns:
+            self._exec("ALTER TABLE diet_logs ADD COLUMN notes TEXT")
 
-    def add_weight(self, animal_id, date, weight, notes):
+    def get_data_folder(self):
+        return self.db_path.parent
+
+    def add_meal(self, animal_id, timestamp, meal_type, food, amount, notes=""):
         return self._exec(
-            "INSERT OR IGNORE INTO weight_data (animal_id, date, weight, notes) VALUES (?, ?, ?, ?)", 
+            "INSERT INTO diet_logs (animal_id, timestamp, meal_type, food_item, amount, notes) VALUES (?, ?, ?, ?, ?, ?)",
+            (animal_id, timestamp, meal_type, food, amount, notes)
+        )
+
+    def add_weight(self, animal_id, date, weight, notes=""):
+        return self._exec(
+            "INSERT INTO weight_data (animal_id, date, weight, notes) VALUES (?, ?, ?, ?)",
             (animal_id, date, weight, notes)
         )
 
-    def add_meal(self, animal_id, timestamp, meal_type, food, amount):
-        return self._exec(
-            "INSERT INTO diet_logs (animal_id, timestamp, meal_type, food_item, amount) VALUES (?, ?, ?, ?, ?)",
-            (animal_id, timestamp, meal_type, food, amount)
+    def get_weight_data(self, animal_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT date, weight, notes FROM weight_data WHERE animal_id=? ORDER BY date",
+            (animal_id,)
         )
+        return cursor.fetchall()
 
-    def clear_data(self):
+    def get_daily_nutrition(self, animal_id):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT DATE(timestamp), SUM(amount) 
+            FROM diet_logs 
+            WHERE animal_id=?
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp)
+        """, (animal_id,))
+        return cursor.fetchall()
+    
+    def get_diet_logs(self, animal_id):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT timestamp, meal_type, food_item, amount, notes "
+            "FROM diet_logs WHERE animal_id=? ORDER BY timestamp",
+            (animal_id,)
+        )
+        return cursor.fetchall()
+
+    def clear_test_data(self):
         self._exec("DELETE FROM animals")
         self._exec("DELETE FROM weight_data")
         self._exec("DELETE FROM diet_logs")
+
+    def create_backup(self):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = self.backup_dir / f"backup_{timestamp}.db"
+        try:
+            self.conn.close()
+            import shutil
+            shutil.copy(self.db_path, backup_path)
+            self.conn = sqlite3.connect(self.db_path)
+            QMessageBox.information(None, "Success", f"Backup created: {backup_path.name}")
+        except Exception as e:
+            QMessageBox.critical(None, "Backup Failed", f"Error: {str(e)}")
+
 
 # ================= CHARTS =================
 class HealthCorrelationChart(QChart):
@@ -336,16 +407,53 @@ class NutritionChart(QChart):
 class KittenTracker(QMainWindow):
     def __init__(self):
         super().__init__()
-        if not os.path.exists('kitten_tracker.db'):
-            self.show_welcome_message()
-        self.db = KittenDatabase()
-        self.unit = 'kg'
-        self.nutrition_goal = 80
-        self.setup_ui()
-        self.load_data()
-        self.toggle_dev_mode(False)
-        self.setWindowIcon(self.generate_random_icon())
-        self.setWindowTitle(self.random_window_title())
+        self.production_mode = True
+        try:
+            self.db = KittenDatabase(production=self.production_mode)
+            self.unit = 'kg'
+            self.nutrition_goal = 80
+            self.setup_ui()
+            self._refresh_animal_list()
+            self.toggle_dev_mode(False)
+            self.setWindowIcon(self.generate_random_icon())
+            self.setWindowTitle(self.random_window_title())
+            self._add_database_menu()
+        except Exception as e:
+            QMessageBox.critical(None, "Startup Failed", f"Application failed to start: {str(e)}")
+            sys.exit(1)
+
+    def _add_database_menu(self):
+        db_menu = self.menuBar().addMenu("Database")
+        db_menu.addAction("Open Data Folder", self.open_data_folder)
+        db_menu.addAction("Clear Test Data", self.clear_test_data_confirm)
+        db_menu.addSeparator()
+        db_menu.addAction("Exit", self.close)
+
+    def open_data_folder(self):
+        path = self.db.get_data_folder()
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", path])
+            else:
+                subprocess.run(["xdg-open", path])
+        except Exception as e:
+            QMessageBox.warning(self, "Open Failed", f"Couldn't open folder: {str(e)}")
+
+    def clear_test_data_confirm(self):
+        confirm = QMessageBox.question(
+            self, "Confirm Clear", 
+            "This will DELETE ALL DATA!\nAre you absolutely sure?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            try:
+                self.db.clear_test_data()
+                self.load_data()
+                QMessageBox.information(self, "Success", "All data cleared successfully")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to clear data: {str(e)}")
 
     def generate_random_icon(self):
         pixmap = QPixmap(64, 64)
@@ -353,7 +461,6 @@ class KittenTracker(QMainWindow):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Background shape
         bg_color = QColor(random.randint(0,255), random.randint(0,255), random.randint(0,255))
         painter.setBrush(bg_color)
         
@@ -366,7 +473,6 @@ class KittenTracker(QMainWindow):
             poly = QPolygon([QPoint(32,8), QPoint(58,56), QPoint(6,56)])
             painter.drawPolygon(poly)
         
-        # Emojis
         emojis = random.sample(["😺","🐾","🐱","🎀","🦴","🍗","🐟","🥛","🌟","⚡","❤️","🌈","🍎","🐭","🧶","🎈"], 2)
         font = painter.font()
         font.setPointSize(24)
@@ -388,11 +494,6 @@ class KittenTracker(QMainWindow):
         nouns = ["Companion", "Friend", "Pal", "Buddy", "Maine Coon"]
         return f"{random.choice(adjectives)} {random.choice(nouns)} Tracker 🐾"
 
-    def show_welcome_message(self):
-        QMessageBox.information(self, "Welcome",
-            "Welcome to Kitten Tracker!\n\n"
-            "Start by adding your first animal using the '+' button.")
-
     def setup_ui(self):
         self.setWindowTitle("Animal Tracker 🐾")
         self.setMinimumSize(1280, 720)
@@ -401,11 +502,9 @@ class KittenTracker(QMainWindow):
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
 
-        # Dashboard Tab
         dash_tab = QWidget()
         layout = QVBoxLayout(dash_tab)
 
-        # Stats
         stats = QHBoxLayout()
         self.current_weight = self._create_card("Current Weight", "N/A", "#4CAF50")
         self.weekly_gain = self._create_card("Weekly Trend", "N/A", "#26C6DA")
@@ -414,7 +513,6 @@ class KittenTracker(QMainWindow):
         stats.addWidget(self.weekly_gain)
         stats.addWidget(self.age_card)
 
-        # Goal Input
         goal_layout = QHBoxLayout()
         goal_layout.addWidget(QLabel("Daily Goal:"))
         self.goal_input = QLineEdit("80")
@@ -426,13 +524,11 @@ class KittenTracker(QMainWindow):
         goal_layout.addWidget(QLabel("grams"))
         stats.addLayout(goal_layout)
 
-        # Charts
         chart_layout = QHBoxLayout()
         self.growth_chart = QChartView(GrowthChart())
         self.nutrition_chart = QChartView(NutritionChart())
-        self.health_chart = QChartView(HealthCorrelationChart())  # New chart
+        self.health_chart = QChartView(HealthCorrelationChart())
         
-        # Set chart sizes
         for chart in [self.growth_chart, self.nutrition_chart, self.health_chart]:
             chart.setMinimumSize(400, 300)
         
@@ -444,7 +540,6 @@ class KittenTracker(QMainWindow):
         layout.addLayout(chart_layout)
         tabs.addTab(dash_tab, "📈 Dashboard")
 
-        # Weight Tab
         weight_tab = QWidget()
         weight_layout = QVBoxLayout(weight_tab)
         
@@ -465,7 +560,6 @@ class KittenTracker(QMainWindow):
         weight_layout.addWidget(self.weight_table)
         tabs.addTab(weight_tab, "⚖️ Weight")        
 
-        # Diet Tab
         diet_tab = QWidget()
         diet_layout = QVBoxLayout(diet_tab)
         
@@ -480,12 +574,11 @@ class KittenTracker(QMainWindow):
         for w in [self.meal_type, self.food_input, self.amount_input, self.log_meal_btn]:
             form.addWidget(w)
         
-        self.diet_table = self._create_table(["Timestamp", "Meal Type", "Food", "Amount (g)"])
+        self.diet_table = self._create_table(["Timestamp", "Meal Type", "Food", "Amount (g)", "Notes"])
         diet_layout.addLayout(form)
         diet_layout.addWidget(self.diet_table)
         tabs.addTab(diet_tab, "🍴 Meals")
 
-        # Status Bar
         status = self.statusBar()
         self.animal_combo = QComboBox()
         self.animal_combo.currentIndexChanged.connect(self.update_meal_types)
@@ -501,7 +594,6 @@ class KittenTracker(QMainWindow):
         status.addPermanentWidget(self.export_btn)
         status.addPermanentWidget(self.backup_btn)
 
-        # Developer Menu
         dev_menu = self.menuBar().addMenu("Developer")
         self.dev_mode = dev_menu.addAction("Development Mode")
         self.dev_mode.setCheckable(True)
@@ -543,7 +635,6 @@ class KittenTracker(QMainWindow):
                 self._show_empty_state()
                 return
 
-            # Load weight data
             weight_data = self.db.get_weight_data(animal_id)
             for date, weight, notes in weight_data:
                 row = self.weight_table.rowCount()
@@ -552,23 +643,21 @@ class KittenTracker(QMainWindow):
                 self.weight_table.setItem(row, 1, QTableWidgetItem(f"{weight:.2f}"))
                 self.weight_table.setItem(row, 2, QTableWidgetItem(notes))
 
-            # Load diet logs
             diet_logs = self.db.get_diet_logs(animal_id)
-            for timestamp, meal_type, food, amount in diet_logs:
+            for timestamp, meal_type, food, amount, notes in diet_logs:
                 row = self.diet_table.rowCount()
                 self.diet_table.insertRow(row)
                 self.diet_table.setItem(row, 0, DateTimeTableWidgetItem(timestamp))
                 self.diet_table.setItem(row, 1, QTableWidgetItem(meal_type))
                 self.diet_table.setItem(row, 2, QTableWidgetItem(food))
                 self.diet_table.setItem(row, 3, QTableWidgetItem(f"{amount:.1f} g"))
+                self.diet_table.setItem(row, 4, QTableWidgetItem(notes))
 
-            # Update charts
             self.growth_chart.chart().update_chart(weight_data, self.unit)
             nutrition_data = self.db.get_daily_nutrition(animal_id)
             self.nutrition_chart.chart().update_chart(nutrition_data, self.nutrition_goal)
             self.health_chart.chart().update_chart(nutrition_data, weight_data)
 
-            # Update stats
             if weight_data:
                 current_weight = weight_data[-1][1] * (2.20462 if self.unit == 'lbs' else 1)
                 self.current_weight.layout().itemAt(1).widget().setText(f"{current_weight:.2f} {self.unit}")
@@ -577,7 +666,6 @@ class KittenTracker(QMainWindow):
                     weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) * (2.20462 if self.unit == 'lbs' else 1)
                     self.weekly_gain.layout().itemAt(1).widget().setText(f"{weekly_gain:+.2f} {self.unit}")
 
-            # Update age
             animal_info = self.db.conn.cursor().execute(
                 "SELECT birthdate FROM animals WHERE id=?", (animal_id,)
             ).fetchone()
@@ -620,13 +708,19 @@ class KittenTracker(QMainWindow):
             QMessageBox.warning(self, "Error", "Select an animal first!")
             return
             
-        date = self.date_input.date().toString("yyyy-MM-dd")
         try:
+            date = self.date_input.date().toString("yyyy-MM-dd")
             weight = float(self.weight_input.text())
-            if self.db.add_weight(animal_id, date, weight, self.notes_input.text()):
+            notes = self.notes_input.text()
+            
+            if self.db.add_weight(animal_id, date, weight, notes):
                 self.load_data()
                 self.weight_input.clear()
                 self.notes_input.clear()
+                self._flash_table_row(self.weight_table, 0)
+            else:
+                QMessageBox.warning(self, "Error", "Duplicate entry for this date!")
+                
         except ValueError:
             QMessageBox.warning(self, "Invalid Input", "Please enter a valid weight")
 
@@ -636,17 +730,36 @@ class KittenTracker(QMainWindow):
             QMessageBox.warning(self, "Error", "Select an animal first!")
             return
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            meal_type = self.meal_type.currentText()
+            food = self.food_input.text().strip() or "Generic Food"
             amount = float(self.amount_input.text())
-            if self.db.add_meal(animal_id, timestamp, 
-                              self.meal_type.currentText(), 
-                              self.food_input.text(), amount):
+            
+            if self.db.add_meal(animal_id, timestamp, meal_type, food, amount):
                 self.load_data()
                 self.food_input.clear()
                 self.amount_input.clear()
+                self._flash_table_row(self.diet_table, 0)
+            else:
+                QMessageBox.warning(self, "Error", "Failed to save meal!")
+                
         except ValueError:
             QMessageBox.warning(self, "Invalid Input", "Enter valid amount")
+
+    def _flash_table_row(self, table, row):
+        table.scrollToItem(table.item(row, 0))
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            if item:
+                item.setBackground(QColor("#4CAF50"))
+        QTimer.singleShot(300, lambda: self._reset_table_colors(table, row))
+
+    def _reset_table_colors(self, table, row):
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            if item:
+                item.setBackground(QColor("#2E2E2E"))
 
     def update_goal(self):
         try:
@@ -693,9 +806,12 @@ class KittenTracker(QMainWindow):
         for animal_id, name in animals:
             self.animal_combo.addItem(name, animal_id)
         if animals:
+            self.animal_combo.setCurrentIndex(0)
             self.load_data()
 
     def current_animal_id(self):
+        if self.animal_combo.currentIndex() == -1:
+            return None
         return self.animal_combo.currentData()
 
     def update_meal_types(self):
@@ -716,6 +832,9 @@ class KittenTracker(QMainWindow):
             self.meal_type.addItems(["Regular Meal", "Special Diet", "Vitamin", "Custom Feed"])
 
     def toggle_dev_mode(self, enabled):
+        self.production_mode = not enabled
+        self.db = KittenDatabase(production=self.production_mode)
+        
         if not hasattr(self, 'test_btn'):
             self.test_btn = QPushButton("🧪 Generate Test Data", clicked=self.create_test_data)
             self.clear_btn = QPushButton("🗑️ Clear Data", clicked=self.clear_test_data)
@@ -726,46 +845,236 @@ class KittenTracker(QMainWindow):
         self.clear_btn.setVisible(enabled)
 
     def create_test_data(self):
-        self.db.clear_data()
-        cursor = self.db.conn.cursor()
-        cursor.execute(
-            "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
-            ("Test Kitty", "Cat", "2023-01-01")
-        )
-        animal_id = cursor.lastrowid
+        if not self.production_mode:
+            try:
+                self.db.clear_test_data()
+                cursor = self.db.conn.cursor()
+                
+                # Add test animal
+                cursor.execute(
+                    "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
+                    ("Whiskers", "Cat", "2022-06-15")
+                )
+                animal_id = cursor.lastrowid
+                
+                # ===== WEIGHT DATA (1 YEAR SPAN) =====
+                base_date = datetime.now() - timedelta(days=365)
+                current_weight = 0.8  # Starting as 8-week-old kitten
+                
+                # Realistic growth curve parameters (logistic growth)
+                max_weight = 4.2  # Adult weight
+                growth_rate = 0.015
+                midpoint_day = 180  # Peak growth around 6 months
+                
+                # Seasonal variation parameters
+                seasonal_amplitude = 0.15  # ±15% weight fluctuation
+                weekly_noise = 0.03  # ±3% daily variation
+                
+                weight_data = []
+                for day in range(365):
+                    # Logistic growth curve
+                    logistic = max_weight / (1 + np.exp(-growth_rate * (day - midpoint_day)))
+                    
+                    # Seasonal variation (sinusoidal)
+                    seasonal = 1 + seasonal_amplitude * np.sin(day/58)  # ~2 month cycles
+                    
+                    # Weekly pattern (human feeding habits)
+                    weekly = 1 + 0.05 * np.sin(day/3.5)  # Weekend/weekday pattern
+                    
+                    # Random daily noise
+                    noise = 1 + random.uniform(-weekly_noise, weekly_noise)
+                    
+                    # Combine all factors
+                    weight = logistic * seasonal * weekly * noise
+                    weight_data.append((
+                        (base_date + timedelta(days=day)).strftime("%Y-%m-%d"),
+                        round(weight, 3),
+                        self._generate_weight_note(day, weight)
+                    ))
+
+                # Insert weight data
+                for date_str, weight, note in weight_data:
+                    self.db.add_weight(animal_id, date_str, weight, note)
+
+                # ===== MEAL DATA =====
+                meal_types = {
+                    "Morning Meal 🍳": {
+                        "times": (7, 9),
+                        "foods": [
+                            ("Chicken Pâté", 30, "Fancy Feast"),
+                            ("Salmon Flakes", 40, "Blue Buffalo"),
+                            ("Kitten Formula", 35, "Vet Recommended")
+                        ],
+                        "notes": [
+                            "Ate enthusiastically", 
+                            "Left some crumbs",
+                            "Finished quickly",
+                            "Played with food first"
+                        ]
+                    },
+                    "Afternoon Snack 🥩": {
+                        "times": (12, 14),
+                        "foods": [
+                            ("Tuna Treat", 15, "Delectables"),
+                            ("Dental Chew", 10, "Greenies"),
+                            ("Chicken Jerky", 20, "PureBites")
+                        ],
+                        "notes": [
+                            "Midday munchies",
+                            "Shared with neighbor cat",
+                            "Ate while birdwatching",
+                            "Left some for later"
+                        ]
+                    },
+                    "Evening Feast 🍗": {
+                        "times": (17, 19),
+                        "foods": [
+                            ("Turkey Dinner", 60, "Wellness Core"),
+                            ("Salmon Supper", 55, "Instinct"),
+                            ("Weight Management", 50, "Hill's Science Diet")
+                        ],
+                        "notes": [
+                            "Cleaned the bowl!",
+                            "Begged for seconds",
+                            "Ate while purring",
+                            "Took a nap after"
+                        ]
+                    },
+                    "Night Cap 🥛": {
+                        "times": (21, 23),
+                        "foods": [
+                            ("Catnip Tea", 5, "Organic"),
+                            ("Lickable Treat", 10, "Churu"),
+                            ("Warm Goat Milk", 15, "Homemade")
+                        ],
+                        "notes": [
+                            "Bedtime ritual",
+                            "Midnight craving",
+                            "Dreamy nibbles",
+                            "Moonlight snack"
+                        ]
+                    }
+                }
+
+                special_dates = {
+                    "2023-12-25": "Christmas Extra Treat! 🎄",
+                    "2023-07-04": "Fireworks Anxiety Meal 💥",
+                    "2023-10-31": "Halloween Pumpkin Mix 🎃",
+                    "2023-03-17": "Green-Themed Food 🍀"
+                }
+
+                for day in range(365):
+                    current_date = base_date + timedelta(days=day)
+                    date_str = current_date.strftime("%Y-%m-%d")
+                    
+                    # Special date handling
+                    special_note = special_dates.get(date_str, None)
+                    
+                    for meal_name, details in meal_types.items():
+                        # Randomize meal time within window
+                        hour = random.randint(details["times"][0], details["times"][1])
+                        minute = random.randint(0, 59)
+                        
+                        # Select food with brand
+                        food, base_amount, brand = random.choice(details["foods"])
+                        
+                        # Amount variation
+                        amount_variation = random.gauss(1, 0.1)  # Normal distribution
+                        amount = round(base_amount * amount_variation, 1)
+                        
+                        # Build notes
+                        note_parts = [
+                            random.choice(details["notes"]),
+                            f"Brand: {brand}",
+                            f"Weather: {self._random_weather()}"
+                        ]
+                        if special_note:
+                            note_parts.append(special_note)
+                        
+                        note = " | ".join(note_parts)
+                        
+                        timestamp = current_date.replace(
+                            hour=hour,
+                            minute=minute
+                        ).strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        self.db.add_meal(
+                            animal_id,
+                            timestamp,
+                            meal_name,
+                            food,
+                            amount,
+                            notes=note
+                        )
+
+                    # Add occasional vet visits
+                    if day % 90 == 0:  # Every 3 months
+                        self.db.add_weight(
+                            animal_id,
+                            date_str,
+                            round(weight_data[day][1] + random.uniform(-0.1, 0.1), 2),
+                            "Post-vet checkup weight 📋"
+                        )
+
+                    # Add birthday celebration
+                    if date_str == "2023-06-15":
+                        self.db.add_meal(
+                            animal_id,
+                            current_date.replace(hour=12, minute=0).strftime("%Y-%m-%d %H:%M:%S"),
+                            "Birthday Feast 🎂",
+                            "Special Salmon Cake",
+                            80,
+                            "1st birthday celebration! 🥳"
+                        )
+
+                self.db.conn.commit()
+                self._refresh_animal_list()
+                self.load_data()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Test data failed: {str(e)}\n{traceback.format_exc()}")
+
+    def _generate_weight_note(self, day, weight):
+        milestones = {
+            30: "First month growth",
+            90: "3-month adolescent surge",
+            180: "6-month teenage phase",
+            270: "9-month young adult",
+            365: "1-year anniversary"
+        }
         
-        # Create weight data
-        base_date = datetime.now() - timedelta(days=30)
-        for d in range(30):
-            self.db.add_weight(
-                animal_id,
-                (base_date + timedelta(days=d)).strftime("%Y-%m-%d"),
-                round(1.5 + (d * 0.07) + random.uniform(-0.03, 0.03), 2),
-                "Auto-generated"
-            )
+        if day in milestones:
+            return f"{milestones[day]} | Weight: {weight:.2f}kg"
         
-        # Create meal data
-        meals = ["Wet Food 🐟", "Dry Food 🥣", "Treat 🍗"]
-        foods = ["Chicken", "Fish", "Beef", "Kibble"]
-        for _ in range(100):
-            random_days = random.randint(0, 29)
-            timestamp = (base_date + timedelta(days=random_days)).strftime("%Y-%m-%d %H:%M:%S")
-            self.db.add_meal(
-                animal_id,
-                timestamp,
-                random.choice(meals),
-                random.choice(foods),
-                random.randint(20, 100)
-            )
+        events = [
+            ("Discovered birds", 0.15),
+            ("New food introduced", 0.1),
+            ("Playtime increase", 0.1),
+            ("Vet visit", 0.05),
+            ("Grooming session", 0.08)
+        ]
         
-        self._refresh_animal_list()
-        if self.animal_combo.count() > 0:
-            self.animal_combo.setCurrentIndex(0)
-        self.load_data()
+        for event, prob in events:
+            if random.random() < prob:
+                return f"{event} | Weight: {weight:.2f}kg"
+        
+        return f"Daily check | Weight: {weight:.2f}kg"
+
+    def _random_weather(self):
+        seasons = [
+            ("❄️ Winter", ["Snowy", "Frigid", "Icy", "Crisp"]),
+            ("🌱 Spring", ["Rainy", "Misty", "Sunny", "Breezy"]),
+            ("☀️ Summer", ["Hot", "Humid", "Stormy", "Dry"]),
+            ("🍂 Fall", ["Cool", "Windy", "Foggy", "Chilly"])
+        ]
+        season_idx = (datetime.now().month % 12) // 3
+        season = seasons[season_idx]
+        return f"{season[0]} - {random.choice(season[1])}"
 
     def clear_test_data(self):
-        self.db.clear_data()
-        self._refresh_animal_list()
+        temp_db = KittenDatabase(production=False)
+        temp_db.clear_test_data()
+        temp_db.conn.close()
         self.load_data()
 
     def export_data(self):
@@ -784,4 +1093,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = KittenTracker()
     window.show()
-    sys.exit(app.exec())        
+    sys.exit(app.exec())
