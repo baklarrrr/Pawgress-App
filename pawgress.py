@@ -35,6 +35,8 @@ class DateTimeTableWidgetItem(QTableWidgetItem):
     def __lt__(self, other):
         return self.sort_value < other.sort_value
 
+
+# ================= DATABASE =================
 # ================= DATABASE =================
 class KittenDatabase:
     def __init__(self, production=True):
@@ -62,7 +64,6 @@ class KittenDatabase:
             QMessageBox.critical(None, "Fatal Error", f"Failed to initialize database: {str(e)}")
             sys.exit(1)
 
-
     def _exec(self, query, params=()):
         try:
             cursor = self.conn.cursor()
@@ -81,7 +82,8 @@ class KittenDatabase:
                 name TEXT NOT NULL,
                 animal_type TEXT,
                 birthdate DATE
-            )""")
+            )
+        """)
         self._exec("""
             CREATE TABLE IF NOT EXISTS weight_data (
                 animal_id INTEGER REFERENCES animals(id) ON DELETE CASCADE,
@@ -89,7 +91,8 @@ class KittenDatabase:
                 weight REAL NOT NULL,
                 notes TEXT,
                 UNIQUE(animal_id, date)
-            )""")
+            )
+        """)
         self._exec("""
             CREATE TABLE IF NOT EXISTS diet_logs (
                 animal_id INTEGER REFERENCES animals(id) ON DELETE CASCADE,
@@ -98,7 +101,8 @@ class KittenDatabase:
                 food_item TEXT,
                 amount REAL,
                 notes TEXT
-            )""")
+            )
+        """)
 
     def _migrate_old_data(self):
         old_path = Path("kitten_tracker.db")
@@ -147,19 +151,18 @@ class KittenDatabase:
     def get_daily_nutrition(self, animal_id):
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT DATE(timestamp), SUM(amount) 
-            FROM diet_logs 
+            SELECT DATE(timestamp), SUM(amount)
+            FROM diet_logs
             WHERE animal_id=?
             GROUP BY DATE(timestamp)
             ORDER BY DATE(timestamp)
         """, (animal_id,))
         return cursor.fetchall()
-    
+
     def get_diet_logs(self, animal_id):
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT timestamp, meal_type, food_item, amount, notes "
-            "FROM diet_logs WHERE animal_id=? ORDER BY timestamp",
+            "SELECT timestamp, meal_type, food_item, amount, notes FROM diet_logs WHERE animal_id=? ORDER BY timestamp",
             (animal_id,)
         )
         return cursor.fetchall()
@@ -182,37 +185,39 @@ class KittenDatabase:
             QMessageBox.critical(None, "Backup Failed", f"Error: {str(e)}")
 
 
+
+
+# ================= CHARTS =================
 # ================= CHARTS =================
 class HealthCorrelationChart(QChart):
     def __init__(self):
         super().__init__()
         self.setTheme(QChart.ChartTheme.ChartThemeDark)
         self.setTitle("Nutrition vs Weight Correlation")
-        
+
         self.scatter = QScatterSeries()
         self.scatter.setName("Daily Data")
         self.scatter.setColor(QColor("#FFA726"))
         self.scatter.setMarkerSize(12)
-        self.scatter.setBorderColor(QColor(0,0,0,0))
-        
+        self.scatter.setBorderColor(QColor(0, 0, 0, 0))
+
         self.trend = QLineSeries()
         self.trend.setName("Trend Line")
         self.trend.setPen(QPen(QColor("#7E57C2"), 2, Qt.PenStyle.DashLine))
-        
+
         self.addSeries(self.scatter)
         self.addSeries(self.trend)
-        
-        # Axes
+
         self.x_axis = QValueAxis()
         self.y_axis = QValueAxis()
         self.x_axis.setTitleText("Daily Nutrition (g)")
         self.y_axis.setTitleText("Weight Change (%)")
         self.x_axis.setLabelFormat("%.0f")
         self.y_axis.setLabelFormat("%.1f%%")
-        
+
         self.addAxis(self.x_axis, Qt.AlignmentFlag.AlignBottom)
         self.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
-        
+
         self.scatter.attachAxis(self.x_axis)
         self.scatter.attachAxis(self.y_axis)
         self.trend.attachAxis(self.x_axis)
@@ -221,29 +226,25 @@ class HealthCorrelationChart(QChart):
     def update_chart(self, nutrition_data, weight_data):
         self.scatter.clear()
         self.trend.clear()
-        
+
         if not nutrition_data or len(weight_data) < 2:
             self.x_axis.setRange(0, 100)
             self.y_axis.setRange(-5, 5)
             return
 
-        # Create weight timeline with interpolation
-        weight_dict = {}
         dates = [datetime.strptime(d[0], "%Y-%m-%d") for d in weight_data]
         weights = [d[1] for d in weight_data]
-        
-        # Calculate daily weight changes
+
         weight_changes = {}
         for i in range(1, len(dates)):
-            days_between = (dates[i] - dates[i-1]).days
+            days_between = (dates[i] - dates[i - 1]).days
             if days_between == 0:
                 continue
-            daily_change = (weights[i] - weights[i-1])/weights[i-1]/days_between
+            daily_change = (weights[i] - weights[i - 1]) / weights[i - 1] / days_between
             for d in range(days_between):
-                current_date = dates[i-1] + timedelta(days=d)
-                weight_changes[current_date] = daily_change * 100  # Percentage
+                current_date = dates[i - 1] + timedelta(days=d)
+                weight_changes[current_date] = daily_change * 100
 
-        # Correlate nutrition with weight changes
         plot_data = []
         for nut_date_str, nut_total in nutrition_data:
             nut_date = datetime.strptime(nut_date_str, "%Y-%m-%d")
@@ -253,59 +254,56 @@ class HealthCorrelationChart(QChart):
         if not plot_data:
             return
 
-        x_vals = [d[0] for d in plot_data]
-        y_vals = [d[1] for d in plot_data]
-        
+        x_vals = [p[0] for p in plot_data]
+        y_vals = [p[1] for p in plot_data]
+
         for x, y in plot_data:
             self.scatter.append(x, y)
 
         if len(x_vals) > 1:
-            # Trend line calculation
             coeffs = np.polyfit(x_vals, y_vals, 1)
             trend_func = np.poly1d(coeffs)
             min_x, max_x = min(x_vals), max(x_vals)
             self.trend.append(min_x, trend_func(min_x))
             self.trend.append(max_x, trend_func(max_x))
-            
-            # Dynamic axis ranges
+
             x_pad = (max_x - min_x) * 0.1
             y_pad = (max(y_vals) - min(y_vals)) * 0.2
             self.x_axis.setRange(min_x - x_pad, max_x + x_pad)
-            self.y_axis.setRange(min(y_vals)-y_pad, max(y_vals)+y_pad)
-            
-            # Correlation coefficient
-            correlation = np.corrcoef(x_vals, y_vals)[0,1]
+            self.y_axis.setRange(min(y_vals) - y_pad, max(y_vals) + y_pad)
+
+            correlation = np.corrcoef(x_vals, y_vals)[0, 1]
             self.setTitle(f"Nutrition vs Weight Change (r = {correlation:.2f})")
+
+
 
 class GrowthChart(QChart):
     def __init__(self):
         super().__init__()
         self.setTheme(QChart.ChartTheme.ChartThemeDark)
         self.setTitle("Weight Growth")
-        
-        # Series
+
         self.scatter = QScatterSeries()
         self.scatter.setName("Measurements")
         self.scatter.setColor(QColor("#4CAF50"))
         self.scatter.setMarkerSize(10)
-        
+
         self.trend = QLineSeries()
         self.trend.setName("Trend Line")
         self.trend.setPen(QPen(QColor("#26C6DA"), 2, Qt.PenStyle.DashLine))
-        
+
         self.addSeries(self.scatter)
         self.addSeries(self.trend)
-        
-        # Axes
+
         self.x_axis = QDateTimeAxis()
         self.y_axis = QValueAxis()
         self.x_axis.setTitleText("Date")
         self.y_axis.setTitleText("Weight (kg)")
         self.x_axis.setFormat("MMM d")
-        
+
         self.addAxis(self.x_axis, Qt.AlignmentFlag.AlignBottom)
         self.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
-        
+
         self.scatter.attachAxis(self.x_axis)
         self.scatter.attachAxis(self.y_axis)
         self.trend.attachAxis(self.x_axis)
@@ -314,7 +312,7 @@ class GrowthChart(QChart):
     def update_chart(self, data, unit='kg'):
         self.scatter.clear()
         self.trend.clear()
-        
+
         if not data:
             self.x_axis.setRange(QDateTime.currentDateTime().addMonths(-1), QDateTime.currentDateTime())
             self.y_axis.setRange(0, 10)
@@ -323,7 +321,7 @@ class GrowthChart(QChart):
         conversion = 2.20462 if unit == 'lbs' else 1
         x_vals = []
         y_vals = []
-        
+
         for date_str, weight, _ in data:
             dt = QDateTime.fromString(date_str, "yyyy-MM-dd")
             adj_weight = weight * conversion
@@ -334,38 +332,45 @@ class GrowthChart(QChart):
         if len(data) > 1:
             coeffs = np.polyfit(x_vals, y_vals, 1)
             trend_func = np.poly1d(coeffs)
-            self.trend.append(QDateTime.fromString(data[0][0], "yyyy-MM-dd").toMSecsSinceEpoch(), trend_func(x_vals[0]))
-            self.trend.append(QDateTime.fromString(data[-1][0], "yyyy-MM-dd").toMSecsSinceEpoch(), trend_func(x_vals[-1]))
+            self.trend.append(
+                QDateTime.fromString(data[0][0], "yyyy-MM-dd").toMSecsSinceEpoch(),
+                trend_func(x_vals[0])
+            )
+            self.trend.append(
+                QDateTime.fromString(data[-1][0], "yyyy-MM-dd").toMSecsSinceEpoch(),
+                trend_func(x_vals[-1])
+            )
 
         self.y_axis.setTitleText(f'Weight ({unit})')
         self.x_axis.setRange(
             QDateTime.fromString(data[0][0], "yyyy-MM-dd"),
             QDateTime.fromString(data[-1][0], "yyyy-MM-dd")
         )
-        self.y_axis.applyNiceNumbers()        
+        self.y_axis.applyNiceNumbers()
+
+        
 
 class NutritionChart(QChart):
     def __init__(self):
         super().__init__()
         self.setTheme(QChart.ChartTheme.ChartThemeDark)
         self.setTitle("Daily Nutrition Intake")
-        
+
         self.bars = QBarSeries()
         self.bars.setLabelsVisible(True)
         self.addSeries(self.bars)
-        
+
         self.goal_line = QLineSeries()
         self.goal_line.setPen(QPen(QColor("#FF5252"), 2, Qt.PenStyle.DashLine))
         self.addSeries(self.goal_line)
-        
-        # Axes
+
         self.x_axis = QBarCategoryAxis()
         self.y_axis = QValueAxis()
         self.y_axis.setTitleText("Grams")
-        
+
         self.addAxis(self.x_axis, Qt.AlignmentFlag.AlignBottom)
         self.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
-        
+
         self.bars.attachAxis(self.x_axis)
         self.bars.attachAxis(self.y_axis)
         self.goal_line.attachAxis(self.x_axis)
@@ -374,7 +379,7 @@ class NutritionChart(QChart):
     def update_chart(self, data, goal=80):
         self.bars.clear()
         self.goal_line.clear()
-        
+
         if not data:
             self.x_axis.clear()
             self.y_axis.setRange(0, 100)
@@ -382,27 +387,31 @@ class NutritionChart(QChart):
 
         bar_set = QBarSet("Intake")
         bar_set.setColor(QColor("#26C6DA"))
-        
+
         categories = []
         amounts = []
         max_val = goal
-        
+
         for date_str, total in data:
             categories.append(date_str)
             clean_total = round(float(total))
             amounts.append(clean_total)
-            max_val = max(max_val, clean_total)
+            if clean_total > max_val:
+                max_val = clean_total
 
         bar_set.append(amounts)
         self.bars.append(bar_set)
-        
+
         self.x_axis.setCategories(categories)
         self.y_axis.setRange(0, max_val * 1.2)
-        
+
         if categories:
             self.goal_line.append(0, goal)
-            self.goal_line.append(len(categories)-1, goal)
+            self.goal_line.append(len(categories) - 1, goal)
 
+
+
+# ================= MAIN APP (PARTIAL) =================
 # ================= MAIN APP (PARTIAL) =================
 class KittenTracker(QMainWindow):
     def __init__(self):
@@ -414,7 +423,6 @@ class KittenTracker(QMainWindow):
             self.nutrition_goal = 80
             self.setup_ui()
             self._refresh_animal_list()
-            self.toggle_dev_mode(False)
             self.setWindowIcon(self.generate_random_icon())
             self.setWindowTitle(self.random_window_title())
             self._add_database_menu()
@@ -428,6 +436,21 @@ class KittenTracker(QMainWindow):
         db_menu.addAction("Clear Test Data", self.clear_test_data_confirm)
         db_menu.addSeparator()
         db_menu.addAction("Exit", self.close)
+
+        # Developer menu and toggles
+        dev_menu = self.menuBar().addMenu("Developer")
+
+        # Make dev-mode toggling optional if you want to switch DB
+        self.dev_mode = dev_menu.addAction("Development Mode")
+        self.dev_mode.setCheckable(True)
+        self.dev_mode.triggered.connect(lambda: self.toggle_dev_mode(self.dev_mode.isChecked()))
+
+        # Randomize UI
+        self.randomize_ui = dev_menu.addAction("Randomize UI")
+        self.randomize_ui.triggered.connect(lambda: [
+            self.setWindowIcon(self.generate_random_icon()),
+            self.setWindowTitle(self.random_window_title())
+        ])
 
     def open_data_folder(self):
         path = self.db.get_data_folder()
@@ -443,7 +466,7 @@ class KittenTracker(QMainWindow):
 
     def clear_test_data_confirm(self):
         confirm = QMessageBox.question(
-            self, "Confirm Clear", 
+            self, "Confirm Clear",
             "This will DELETE ALL DATA!\nAre you absolutely sure?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
@@ -460,32 +483,35 @@ class KittenTracker(QMainWindow):
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        bg_color = QColor(random.randint(0,255), random.randint(0,255), random.randint(0,255))
+
+        bg_color = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
         painter.setBrush(bg_color)
-        
+
         shape = random.choice(["circle", "square", "triangle"])
         if shape == "circle":
             painter.drawEllipse(4, 4, 56, 56)
         elif shape == "square":
             painter.drawRoundedRect(4, 4, 56, 56, 12, 12)
         else:
-            poly = QPolygon([QPoint(32,8), QPoint(58,56), QPoint(6,56)])
+            poly = QPolygon([QPoint(32, 8), QPoint(58, 56), QPoint(6, 56)])
             painter.drawPolygon(poly)
-        
-        emojis = random.sample(["😺","🐾","🐱","🎀","🦴","🍗","🐟","🥛","🌟","⚡","❤️","🌈","🍎","🐭","🧶","🎈"], 2)
+
+        emojis = random.sample(
+            ["😺", "🐾", "🐱", "🎀", "🦴", "🍗", "🐟", "🥛", "🌟", "⚡", "❤️", "🌈", "🍎", "🐭", "🧶", "🎈"],
+            2
+        )
         font = painter.font()
         font.setPointSize(24)
         painter.setFont(font)
-        painter.setPen(QColor(255,255,255))
-        
+        painter.setPen(QColor(255, 255, 255))
+
         for i, emoji in enumerate(emojis):
             painter.drawText(
-                random.randint(8,32),
-                random.randint(32,48) + i*16,
+                random.randint(8, 32),
+                random.randint(32, 48) + i * 16,
                 emoji
             )
-        
+
         painter.end()
         return QIcon(pixmap)
 
@@ -528,10 +554,10 @@ class KittenTracker(QMainWindow):
         self.growth_chart = QChartView(GrowthChart())
         self.nutrition_chart = QChartView(NutritionChart())
         self.health_chart = QChartView(HealthCorrelationChart())
-        
+
         for chart in [self.growth_chart, self.nutrition_chart, self.health_chart]:
             chart.setMinimumSize(400, 300)
-        
+
         chart_layout.addWidget(self.growth_chart)
         chart_layout.addWidget(self.nutrition_chart)
         chart_layout.addWidget(self.health_chart)
@@ -542,7 +568,7 @@ class KittenTracker(QMainWindow):
 
         weight_tab = QWidget()
         weight_layout = QVBoxLayout(weight_tab)
-        
+
         form = QHBoxLayout()
         self.date_input = QDateEdit(calendarPopup=True)
         self.date_input.setDate(QDate.currentDate())
@@ -551,18 +577,18 @@ class KittenTracker(QMainWindow):
         self.weight_input.setValidator(QDoubleValidator(0.1, 50.0, 2))
         self.notes_input = QLineEdit(placeholderText="Notes")
         self.add_weight_btn = QPushButton("➕ Add Entry", clicked=self.add_weight)
-        
+
         for w in [self.date_input, self.weight_input, self.notes_input, self.add_weight_btn]:
             form.addWidget(w)
-        
+
         self.weight_table = self._create_table(["Date", "Weight", "Notes"])
         weight_layout.addLayout(form)
         weight_layout.addWidget(self.weight_table)
-        tabs.addTab(weight_tab, "⚖️ Weight")        
+        tabs.addTab(weight_tab, "⚖️ Weight")
 
         diet_tab = QWidget()
         diet_layout = QVBoxLayout(diet_tab)
-        
+
         form = QHBoxLayout()
         self.meal_type = QComboBox()
         self.meal_type.addItems(["Breakfast 🍳", "Lunch 🥩", "Dinner 🍗", "Snack 🥛"])
@@ -570,10 +596,10 @@ class KittenTracker(QMainWindow):
         self.amount_input = QLineEdit(placeholderText="Grams")
         self.amount_input.setValidator(QDoubleValidator(1.0, 1000.0, 1))
         self.log_meal_btn = QPushButton("📝 Log Meal", clicked=self.log_meal)
-        
+
         for w in [self.meal_type, self.food_input, self.amount_input, self.log_meal_btn]:
             form.addWidget(w)
-        
+
         self.diet_table = self._create_table(["Timestamp", "Meal Type", "Food", "Amount (g)", "Notes"])
         diet_layout.addLayout(form)
         diet_layout.addWidget(self.diet_table)
@@ -594,15 +620,12 @@ class KittenTracker(QMainWindow):
         status.addPermanentWidget(self.export_btn)
         status.addPermanentWidget(self.backup_btn)
 
-        dev_menu = self.menuBar().addMenu("Developer")
-        self.dev_mode = dev_menu.addAction("Development Mode")
-        self.dev_mode.setCheckable(True)
-        self.dev_mode.triggered.connect(lambda: self.toggle_dev_mode(self.dev_mode.isChecked()))
-        self.randomize_ui = dev_menu.addAction("Randomize UI")
-        self.randomize_ui.triggered.connect(lambda: [
-            self.setWindowIcon(self.generate_random_icon()),
-            self.setWindowTitle(self.random_window_title())
-        ])
+        # The test-data and clear-data buttons always appear so you can generate anytime:
+        self.test_btn = QPushButton("🧪 Generate Test Data", clicked=self.create_test_data)
+        self.clear_btn = QPushButton("🗑️ Clear Data", clicked=self.clear_test_data)
+        for btn in [self.test_btn, self.clear_btn]:
+            btn.setStyleSheet("background: #FFA726; padding: 5px;")
+            status.addPermanentWidget(btn)
 
     def _create_table(self, headers):
         table = QTableWidget()
@@ -623,10 +646,9 @@ class KittenTracker(QMainWindow):
 
     def load_data(self):
         animal_id = self.current_animal_id()
-        
         self.weight_table.setUpdatesEnabled(False)
         self.diet_table.setUpdatesEnabled(False)
-        
+
         try:
             self.weight_table.setRowCount(0)
             self.diet_table.setRowCount(0)
@@ -661,15 +683,15 @@ class KittenTracker(QMainWindow):
             if weight_data:
                 current_weight = weight_data[-1][1] * (2.20462 if self.unit == 'lbs' else 1)
                 self.current_weight.layout().itemAt(1).widget().setText(f"{current_weight:.2f} {self.unit}")
-                
+
                 if len(weight_data) > 7:
-                    weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) * (2.20462 if self.unit == 'lbs' else 1)
+                    weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) * \
+                                  (2.20462 if self.unit == 'lbs' else 1)
                     self.weekly_gain.layout().itemAt(1).widget().setText(f"{weekly_gain:+.2f} {self.unit}")
 
             animal_info = self.db.conn.cursor().execute(
                 "SELECT birthdate FROM animals WHERE id=?", (animal_id,)
             ).fetchone()
-            
             if animal_info and animal_info[0]:
                 try:
                     birthdate = QDate.fromString(animal_info[0], "yyyy-MM-dd")
@@ -680,7 +702,7 @@ class KittenTracker(QMainWindow):
                     self.age_card.layout().itemAt(1).widget().setText(age_text)
                 except:
                     self.age_card.layout().itemAt(1).widget().setText("N/A")
-                    
+
         finally:
             self.weight_table.setUpdatesEnabled(True)
             self.diet_table.setUpdatesEnabled(True)
@@ -707,12 +729,12 @@ class KittenTracker(QMainWindow):
         if not animal_id:
             QMessageBox.warning(self, "Error", "Select an animal first!")
             return
-            
+
         try:
             date = self.date_input.date().toString("yyyy-MM-dd")
             weight = float(self.weight_input.text())
             notes = self.notes_input.text()
-            
+
             if self.db.add_weight(animal_id, date, weight, notes):
                 self.load_data()
                 self.weight_input.clear()
@@ -720,7 +742,6 @@ class KittenTracker(QMainWindow):
                 self._flash_table_row(self.weight_table, 0)
             else:
                 QMessageBox.warning(self, "Error", "Duplicate entry for this date!")
-                
         except ValueError:
             QMessageBox.warning(self, "Invalid Input", "Please enter a valid weight")
 
@@ -735,7 +756,7 @@ class KittenTracker(QMainWindow):
             meal_type = self.meal_type.currentText()
             food = self.food_input.text().strip() or "Generic Food"
             amount = float(self.amount_input.text())
-            
+
             if self.db.add_meal(animal_id, timestamp, meal_type, food, amount):
                 self.load_data()
                 self.food_input.clear()
@@ -743,7 +764,6 @@ class KittenTracker(QMainWindow):
                 self._flash_table_row(self.diet_table, 0)
             else:
                 QMessageBox.warning(self, "Error", "Failed to save meal!")
-                
         except ValueError:
             QMessageBox.warning(self, "Invalid Input", "Enter valid amount")
 
@@ -772,17 +792,17 @@ class KittenTracker(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Add Animal")
         layout = QVBoxLayout()
-        
+
         name_input = QLineEdit(placeholderText="Name")
         type_input = QComboBox()
         type_input.addItems(["Cat", "Dog", "Other"])
         birthdate_input = QDateEdit(calendarPopup=True)
         birthdate_input.setDate(QDate.currentDate())
-        
+
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(dialog.accept)
         btn_box.rejected.connect(dialog.reject)
-        
+
         layout.addWidget(QLabel("Name:"))
         layout.addWidget(name_input)
         layout.addWidget(QLabel("Type:"))
@@ -795,7 +815,7 @@ class KittenTracker(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted and name_input.text().strip():
             self.db._exec(
                 "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
-                (name_input.text(), type_input.currentText(), 
+                (name_input.text(), type_input.currentText(),
                  birthdate_input.date().toString("yyyy-MM-dd"))
             )
             self._refresh_animal_list()
@@ -818,7 +838,7 @@ class KittenTracker(QMainWindow):
         animal_id = self.current_animal_id()
         if not animal_id:
             return
-            
+
         animal_type = self.db.conn.cursor().execute(
             "SELECT animal_type FROM animals WHERE id=?", (animal_id,)
         ).fetchone()[0]
@@ -832,207 +852,163 @@ class KittenTracker(QMainWindow):
             self.meal_type.addItems(["Regular Meal", "Special Diet", "Vitamin", "Custom Feed"])
 
     def toggle_dev_mode(self, enabled):
-        self.production_mode = not enabled
-        self.db = KittenDatabase(production=self.production_mode)
-        
-        if not hasattr(self, 'test_btn'):
-            self.test_btn = QPushButton("🧪 Generate Test Data", clicked=self.create_test_data)
-            self.clear_btn = QPushButton("🗑️ Clear Data", clicked=self.clear_test_data)
-            for btn in [self.test_btn, self.clear_btn]:
-                btn.setStyleSheet("background: #FFA726; padding: 5px;")
-                self.statusBar().addPermanentWidget(btn)
-        self.test_btn.setVisible(enabled)
-        self.clear_btn.setVisible(enabled)
+        """
+        Optional: Switches the database between 'production' and 'dev'.
+        You can ignore this if you want to keep using the same DB.
+        """
+        if enabled:
+            QMessageBox.information(self, "Dev Mode On", "Now using dev DB.")
+            self.db.conn.close()
+            self.db = KittenDatabase(production=False)
+        else:
+            QMessageBox.information(self, "Dev Mode Off", "Now using production DB.")
+            self.db.conn.close()
+            self.db = KittenDatabase(production=True)
+        self._refresh_animal_list()
 
     def create_test_data(self):
-        if not self.production_mode:
-            try:
-                self.db.clear_test_data()
-                cursor = self.db.conn.cursor()
-                
-                # Add test animal
-                cursor.execute(
-                    "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
-                    ("Whiskers", "Cat", "2022-06-15")
-                )
-                animal_id = cursor.lastrowid
-                
-                # ===== WEIGHT DATA (1 YEAR SPAN) =====
-                base_date = datetime.now() - timedelta(days=365)
-                current_weight = 0.8  # Starting as 8-week-old kitten
-                
-                # Realistic growth curve parameters (logistic growth)
-                max_weight = 4.2  # Adult weight
-                growth_rate = 0.015
-                midpoint_day = 180  # Peak growth around 6 months
-                
-                # Seasonal variation parameters
-                seasonal_amplitude = 0.15  # ±15% weight fluctuation
-                weekly_noise = 0.03  # ±3% daily variation
-                
-                weight_data = []
-                for day in range(365):
-                    # Logistic growth curve
-                    logistic = max_weight / (1 + np.exp(-growth_rate * (day - midpoint_day)))
-                    
-                    # Seasonal variation (sinusoidal)
-                    seasonal = 1 + seasonal_amplitude * np.sin(day/58)  # ~2 month cycles
-                    
-                    # Weekly pattern (human feeding habits)
-                    weekly = 1 + 0.05 * np.sin(day/3.5)  # Weekend/weekday pattern
-                    
-                    # Random daily noise
-                    noise = 1 + random.uniform(-weekly_noise, weekly_noise)
-                    
-                    # Combine all factors
-                    weight = logistic * seasonal * weekly * noise
-                    weight_data.append((
-                        (base_date + timedelta(days=day)).strftime("%Y-%m-%d"),
-                        round(weight, 3),
-                        self._generate_weight_note(day, weight)
-                    ))
+        """
+        Creates 1-year test data for the currently open DB (dev or production).
+        Data should appear in both Weight and Meals tabs.
+        """
+        try:
+            self.db.clear_test_data()
+            cursor = self.db.conn.cursor()
 
-                # Insert weight data
-                for date_str, weight, note in weight_data:
-                    self.db.add_weight(animal_id, date_str, weight, note)
+            # Insert a single test animal
+            cursor.execute(
+                "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
+                ("Whiskers", "Cat", "2022-06-15")
+            )
+            animal_id = cursor.lastrowid
 
-                # ===== MEAL DATA =====
-                meal_types = {
-                    "Morning Meal 🍳": {
-                        "times": (7, 9),
-                        "foods": [
-                            ("Chicken Pâté", 30, "Fancy Feast"),
-                            ("Salmon Flakes", 40, "Blue Buffalo"),
-                            ("Kitten Formula", 35, "Vet Recommended")
-                        ],
-                        "notes": [
-                            "Ate enthusiastically", 
-                            "Left some crumbs",
-                            "Finished quickly",
-                            "Played with food first"
-                        ]
-                    },
-                    "Afternoon Snack 🥩": {
-                        "times": (12, 14),
-                        "foods": [
-                            ("Tuna Treat", 15, "Delectables"),
-                            ("Dental Chew", 10, "Greenies"),
-                            ("Chicken Jerky", 20, "PureBites")
-                        ],
-                        "notes": [
-                            "Midday munchies",
-                            "Shared with neighbor cat",
-                            "Ate while birdwatching",
-                            "Left some for later"
-                        ]
-                    },
-                    "Evening Feast 🍗": {
-                        "times": (17, 19),
-                        "foods": [
-                            ("Turkey Dinner", 60, "Wellness Core"),
-                            ("Salmon Supper", 55, "Instinct"),
-                            ("Weight Management", 50, "Hill's Science Diet")
-                        ],
-                        "notes": [
-                            "Cleaned the bowl!",
-                            "Begged for seconds",
-                            "Ate while purring",
-                            "Took a nap after"
-                        ]
-                    },
-                    "Night Cap 🥛": {
-                        "times": (21, 23),
-                        "foods": [
-                            ("Catnip Tea", 5, "Organic"),
-                            ("Lickable Treat", 10, "Churu"),
-                            ("Warm Goat Milk", 15, "Homemade")
-                        ],
-                        "notes": [
-                            "Bedtime ritual",
-                            "Midnight craving",
-                            "Dreamy nibbles",
-                            "Moonlight snack"
-                        ]
-                    }
+            base_date = datetime.now() - timedelta(days=365)
+            max_weight = 4.2   # adult cat in kg
+            growth_rate = 0.015
+            midpoint_day = 180
+            seasonal_amplitude = 0.15
+            weekly_noise = 0.03
+
+            # Insert daily weight data
+            for day in range(365):
+                logistic = max_weight / (1 + np.exp(-growth_rate * (day - midpoint_day)))
+                seasonal = 1 + seasonal_amplitude * np.sin(day / 58)
+                weekly = 1 + 0.05 * np.sin(day / 3.5)
+                noise = 1 + random.uniform(-weekly_noise, weekly_noise)
+                weight = logistic * seasonal * weekly * noise
+                date_str = (base_date + timedelta(days=day)).strftime("%Y-%m-%d")
+
+                note = self._generate_weight_note(day, weight)
+                self.db.add_weight(animal_id, date_str, round(weight, 3), note)
+
+            # Insert meal logs
+            meal_types = {
+                "Morning Meal 🍳": {
+                    "times": (7, 9),
+                    "foods": [
+                        ("Chicken Pâté", 30, "Fancy Feast"),
+                        ("Salmon Flakes", 40, "Blue Buffalo"),
+                        ("Kitten Formula", 35, "Vet Recommended")
+                    ],
+                    "notes": [
+                        "Ate enthusiastically",
+                        "Left some crumbs",
+                        "Finished quickly",
+                        "Played with food first"
+                    ]
+                },
+                "Afternoon Snack 🥩": {
+                    "times": (12, 14),
+                    "foods": [
+                        ("Tuna Treat", 15, "Delectables"),
+                        ("Dental Chew", 10, "Greenies"),
+                        ("Chicken Jerky", 20, "PureBites")
+                    ],
+                    "notes": [
+                        "Midday munchies",
+                        "Shared with neighbor cat",
+                        "Ate while birdwatching",
+                        "Left some for later"
+                    ]
+                },
+                "Evening Feast 🍗": {
+                    "times": (17, 19),
+                    "foods": [
+                        ("Turkey Dinner", 60, "Wellness Core"),
+                        ("Salmon Supper", 55, "Instinct"),
+                        ("Weight Management", 50, "Hill's Science Diet")
+                    ],
+                    "notes": [
+                        "Cleaned the bowl!",
+                        "Begged for seconds",
+                        "Ate while purring",
+                        "Took a nap after"
+                    ]
+                },
+                "Night Cap 🥛": {
+                    "times": (21, 23),
+                    "foods": [
+                        ("Catnip Tea", 5, "Organic"),
+                        ("Lickable Treat", 10, "Churu"),
+                        ("Warm Goat Milk", 15, "Homemade")
+                    ],
+                    "notes": [
+                        "Bedtime ritual",
+                        "Midnight craving",
+                        "Dreamy nibbles",
+                        "Moonlight snack"
+                    ]
                 }
+            }
 
-                special_dates = {
-                    "2023-12-25": "Christmas Extra Treat! 🎄",
-                    "2023-07-04": "Fireworks Anxiety Meal 💥",
-                    "2023-10-31": "Halloween Pumpkin Mix 🎃",
-                    "2023-03-17": "Green-Themed Food 🍀"
-                }
+            special_dates = {
+                "2023-12-25": "Christmas Extra Treat! 🎄",
+                "2023-07-04": "Fireworks Anxiety Meal 💥",
+                "2023-10-31": "Halloween Pumpkin Mix 🎃",
+                "2023-03-17": "Green-Themed Food 🍀"
+            }
 
-                for day in range(365):
-                    current_date = base_date + timedelta(days=day)
-                    date_str = current_date.strftime("%Y-%m-%d")
-                    
-                    # Special date handling
-                    special_note = special_dates.get(date_str, None)
-                    
-                    for meal_name, details in meal_types.items():
-                        # Randomize meal time within window
-                        hour = random.randint(details["times"][0], details["times"][1])
-                        minute = random.randint(0, 59)
-                        
-                        # Select food with brand
-                        food, base_amount, brand = random.choice(details["foods"])
-                        
-                        # Amount variation
-                        amount_variation = random.gauss(1, 0.1)  # Normal distribution
-                        amount = round(base_amount * amount_variation, 1)
-                        
-                        # Build notes
-                        note_parts = [
-                            random.choice(details["notes"]),
-                            f"Brand: {brand}",
-                            f"Weather: {self._random_weather()}"
-                        ]
-                        if special_note:
-                            note_parts.append(special_note)
-                        
-                        note = " | ".join(note_parts)
-                        
-                        timestamp = current_date.replace(
-                            hour=hour,
-                            minute=minute
-                        ).strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        self.db.add_meal(
-                            animal_id,
-                            timestamp,
-                            meal_name,
-                            food,
-                            amount,
-                            notes=note
-                        )
+            for day in range(365):
+                current_date = base_date + timedelta(days=day)
+                date_str = current_date.strftime("%Y-%m-%d")
+                special_note = special_dates.get(date_str, None)
 
-                    # Add occasional vet visits
-                    if day % 90 == 0:  # Every 3 months
-                        self.db.add_weight(
-                            animal_id,
-                            date_str,
-                            round(weight_data[day][1] + random.uniform(-0.1, 0.1), 2),
-                            "Post-vet checkup weight 📋"
-                        )
+                for meal_name, details in meal_types.items():
+                    hour = random.randint(details["times"][0], details["times"][1])
+                    minute = random.randint(0, 59)
+                    food, base_amount, brand = random.choice(details["foods"])
+                    amount_variation = random.gauss(1, 0.1)
+                    amount = round(base_amount * amount_variation, 1)
 
-                    # Add birthday celebration
-                    if date_str == "2023-06-15":
-                        self.db.add_meal(
-                            animal_id,
-                            current_date.replace(hour=12, minute=0).strftime("%Y-%m-%d %H:%M:%S"),
-                            "Birthday Feast 🎂",
-                            "Special Salmon Cake",
-                            80,
-                            "1st birthday celebration! 🥳"
-                        )
+                    note_parts = [
+                        random.choice(details["notes"]),
+                        f"Brand: {brand}",
+                        f"Weather: {self._random_weather()}"
+                    ]
+                    if special_note:
+                        note_parts.append(special_note)
 
-                self.db.conn.commit()
-                self._refresh_animal_list()
-                self.load_data()
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Test data failed: {str(e)}\n{traceback.format_exc()}")
+                    note = " | ".join(note_parts)
+                    timestamp = current_date.replace(hour=hour, minute=minute).strftime("%Y-%m-%d %H:%M:%S")
+                    self.db.add_meal(animal_id, timestamp, meal_name, food, amount, notes=note)
+
+                # Birthday
+                if date_str == "2023-06-15":
+                    self.db.add_meal(
+                        animal_id,
+                        current_date.replace(hour=12, minute=0).strftime("%Y-%m-%d %H:%M:%S"),
+                        "Birthday Feast 🎂",
+                        "Special Salmon Cake",
+                        80,
+                        "1st birthday celebration! 🥳"
+                    )
+
+            self.db.conn.commit()
+            self._refresh_animal_list()
+            self.load_data()
+            QMessageBox.information(self, "Test Data Created", "Inserted 1-year cat data successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Test data failed: {str(e)}")
 
     def _generate_weight_note(self, day, weight):
         milestones = {
@@ -1042,10 +1018,9 @@ class KittenTracker(QMainWindow):
             270: "9-month young adult",
             365: "1-year anniversary"
         }
-        
         if day in milestones:
             return f"{milestones[day]} | Weight: {weight:.2f}kg"
-        
+
         events = [
             ("Discovered birds", 0.15),
             ("New food introduced", 0.1),
@@ -1053,11 +1028,9 @@ class KittenTracker(QMainWindow):
             ("Vet visit", 0.05),
             ("Grooming session", 0.08)
         ]
-        
         for event, prob in events:
             if random.random() < prob:
                 return f"{event} | Weight: {weight:.2f}kg"
-        
         return f"Daily check | Weight: {weight:.2f}kg"
 
     def _random_weather(self):
@@ -1072,22 +1045,24 @@ class KittenTracker(QMainWindow):
         return f"{season[0]} - {random.choice(season[1])}"
 
     def clear_test_data(self):
-        temp_db = KittenDatabase(production=False)
-        temp_db.clear_test_data()
-        temp_db.conn.close()
+        self.db.clear_test_data()
         self.load_data()
+        QMessageBox.information(self, "Data Cleared", "All test data was removed from the current DB.")
 
     def export_data(self):
         animal_id = self.current_animal_id()
         if not animal_id:
             return
-            
+
         filename = f"weight_data_{animal_id}.csv"
         with open(filename, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Date', 'Weight', 'Notes'])
             writer.writerows(self.db.get_weight_data(animal_id))
         QMessageBox.information(self, "Export Complete", f"Data saved to {filename}")
+
+
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
