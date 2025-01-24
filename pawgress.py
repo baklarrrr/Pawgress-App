@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import sys
 import csv
@@ -27,23 +28,40 @@ class DateTimeTableWidgetItem(QTableWidgetItem):
 class KittenDatabase:
     def __init__(self):
         self.conn = sqlite3.connect('kitten_tracker.db')
+        self._exec("PRAGMA foreign_keys = ON")  # Force foreign key enforcement
+        self._exec("PRAGMA journal_mode = WAL")  # Better concurrency
+        self._exec("CREATE INDEX IF NOT EXISTS idx_weight ON weight_data(animal_id, date)")
+        self._exec("CREATE INDEX IF NOT EXISTS idx_meals ON diet_logs(animal_id, timestamp)")
         self._exec('''CREATE TABLE IF NOT EXISTS animals 
                     (id INTEGER PRIMARY KEY, name TEXT, animal_type TEXT, birthdate TEXT)''')
         self._exec('''CREATE TABLE IF NOT EXISTS weight_data 
                     (id INTEGER PRIMARY KEY, animal_id INTEGER, date TEXT, weight REAL, notes TEXT,
-                     FOREIGN KEY(animal_id) REFERENCES animals(id))''')
+                    UNIQUE(animal_id, date),  -- Add this line
+                    FOREIGN KEY(animal_id) REFERENCES animals(id))''')
         self._exec('''CREATE TABLE IF NOT EXISTS diet_logs 
                     (id INTEGER PRIMARY KEY, animal_id INTEGER, timestamp TEXT, meal_type TEXT, 
                      food_item TEXT, amount REAL, FOREIGN KEY(animal_id) REFERENCES animals(id))''')
 
     def _exec(self, query, params=()):
         try:
-            self.conn.cursor().execute(query, params)
+            cursor = self.conn.cursor()
+            cursor.execute(query, params)
             self.conn.commit()
             return True
         except sqlite3.Error as e:
-            QMessageBox.warning(None, "Database Error", f"An error occurred: {e}")
+            self.conn.rollback()
+            QMessageBox.warning(None, "Database Error", 
+                f"Operation failed: {str(e)}")
             return False
+
+    def create_backup(self):
+        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
+        try:
+            self.conn.execute(f"VACUUM INTO '{backup_name}'")
+            return True
+        except sqlite3.Error as e:
+            QMessageBox.warning(None, "Backup Failed", str(e))
+            return False        
 
     def get_weight_data(self, animal_id):  # 👈 Add animal_id parameter
         return self.conn.cursor().execute(
@@ -139,10 +157,19 @@ class NutritionChart(QChart):
     def __init__(self):
         super().__init__()
         self.setTheme(QChart.ChartTheme.ChartThemeDark)
-        self.setTitle("Nutrition Intake")
+        self.setTitle("Daily Nutrition Intake")
+        self.setBackgroundBrush(QColor("#2E2E2E"))
+        
+        # Configure bars
         self.bars = QBarSeries()
+        self.bars.setLabelsVisible(True)
+        self.bars.setLabelsPrecision(0)
+        
+        # Configure goal line
         self.goal_line = QLineSeries()
-        self.goal_line.setPen(QPen(QColor("#FF5252"), 2))
+        self.goal_line.setName("Daily Goal")
+        self.goal_line.setPen(QPen(QColor("#FF5252"), 2, Qt.PenStyle.DashLine))
+        
         self.addSeries(self.bars)
         self.addSeries(self.goal_line)
         self._setup_axes()
@@ -150,11 +177,17 @@ class NutritionChart(QChart):
     def _setup_axes(self):
         self.x_axis = QBarCategoryAxis()
         self.y_axis = QValueAxis()
+        
+        # Styling
         for axis in [self.x_axis, self.y_axis]:
             axis.setTitleBrush(QColor("#FFFFFF"))
             axis.setLabelsBrush(QColor("#FFFFFF"))
+            axis.setGridLineColor(QColor("#404040"))
+        
+        self.y_axis.setTitleText("Grams")
         self.addAxis(self.x_axis, Qt.AlignmentFlag.AlignBottom)
         self.addAxis(self.y_axis, Qt.AlignmentFlag.AlignLeft)
+        
         self.bars.attachAxis(self.x_axis)
         self.bars.attachAxis(self.y_axis)
         self.goal_line.attachAxis(self.x_axis)
@@ -163,25 +196,38 @@ class NutritionChart(QChart):
     def update_chart(self, data, goal=80):
         self.bars.clear()
         self.goal_line.clear()
-        if not data: return
+        
+        if not data:
+            self.x_axis.clear()
+            self.y_axis.setRange(0, 100)
+            return
 
         bar_set = QBarSet("Intake")
-        bar_set.setLabelColor(QColor("#FFFFFF"))
+        bar_set.setColor(QColor("#26C6DA"))
+        bar_set.setBorderColor(QColor("#000000"))
+        
         categories = []
         amounts = []
+        max_value = goal  # Start with goal as minimum max
+        
         for date_str, amount in data:
             categories.append(date_str)
             amounts.append(amount)
+            if amount > max_value:
+                max_value = amount
 
         bar_set.append(amounts)
         self.bars.append(bar_set)
+        
+        # Configure axes
         self.x_axis.clear()
         self.x_axis.append(categories)
-        self.y_axis.setRange(0, max(amounts + [goal]) * 1.2)
-
+        self.y_axis.setRange(0, max_value * 1.2)
+        
+        # Draw goal line with dynamic positioning
         if categories:
             self.goal_line.append(0, goal)
-            self.goal_line.append(len(categories), goal)
+            self.goal_line.append(len(categories)-1, goal)
             
 
 # ================= MAIN APP =================
@@ -239,6 +285,8 @@ class KittenTracker(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        if not os.path.exists('kitten_tracker.db'):
+            self.show_welcome_message()
         self.db = KittenDatabase()
         self.unit = 'kg'
         self.nutrition_goal = 80
@@ -249,16 +297,56 @@ class KittenTracker(QMainWindow):
         # Set random icon and title
         self.setWindowIcon(self.generate_random_icon())
         self.setWindowTitle(self.random_window_title())
+    
+    def show_welcome_message(self):
+        QMessageBox.information(self, "Welcome",
+            "Welcome to Kitten Tracker!\n\n"
+            "Start by adding your first animal using the '+' button.")   
 
     def export_data(self):
         animal_id = self.current_animal_id()
         if not animal_id:
             return
             
-        with open('weight_data.csv', 'w', newline='') as f:
+        sanitized_id = str(int(animal_id))  # Force numeric ID
+        filename = f"weight_data_{sanitized_id}.csv"
+        with open(filename, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Date', 'Weight', 'Notes'])
             writer.writerows(self.db.get_weight_data(animal_id))  # 👈 Add animal_id  
+
+        try:
+            if not animal_id:
+                self._show_empty_state()
+                return
+            
+            # Load weight data
+            weight_data = self.db.get_weight_data(animal_id)
+            self.weight_table.setRowCount(0)
+            for date, weight, notes in weight_data:
+                row = self.weight_table.rowCount()
+                self.weight_table.insertRow(row)
+                self.weight_table.setItem(row, 0, DateTimeTableWidgetItem(date))
+                self.weight_table.setItem(row, 1, QTableWidgetItem(f"{weight:.2f}"))
+                self.weight_table.setItem(row, 2, QTableWidgetItem(notes))
+            
+            # Load diet logs
+            diet_logs = self.db.get_diet_logs(animal_id)
+            self.diet_table.setRowCount(0)
+            for timestamp, meal_type, food, amount in diet_logs:
+                row = self.diet_table.rowCount()
+                self.diet_table.insertRow(row)
+                self.diet_table.setItem(row, 0, DateTimeTableWidgetItem(timestamp))
+                self.diet_table.setItem(row, 1, QTableWidgetItem(meal_type))
+                self.diet_table.setItem(row, 2, QTableWidgetItem(food))
+                self.diet_table.setItem(row, 3, QTableWidgetItem(f"{amount:.1f} g"))
+            
+            # Update charts and stats
+            self.update_charts_and_stats(weight_data, animal_id)
+            
+        finally:
+            self.weight_table.setUpdatesEnabled(True)
+            self.diet_table.setUpdatesEnabled(True)    
 
     def setup_ui(self):
         self.setWindowTitle("Animal Tracker 🐾")
@@ -276,16 +364,22 @@ class KittenTracker(QMainWindow):
         stats = QHBoxLayout()
         self.current_weight = self._create_card("Current Weight", "N/A", "#4CAF50")
         self.weekly_gain = self._create_card("Weekly Trend", "N/A", "#26C6DA")
-        self.age_card = self._create_card("Age", "N/A", "#7E57C2")  # 👈 New card (purple)
+        self.age_card = self._create_card("Age", "N/A", "#7E57C2")
         stats.addWidget(self.current_weight)
         stats.addWidget(self.weekly_gain)
-        stats.addWidget(self.age_card)  # 👈 Add this line
+        stats.addWidget(self.age_card)
 
-        # Add this near the stats layout
-        self.goal_input = QLineEdit("80", placeholderText="Daily Goal (g)")
+        # Goal input
+        goal_layout = QHBoxLayout()
+        goal_layout.addWidget(QLabel("Daily Goal:"))
+        self.goal_input = QLineEdit("80")
+        self.goal_input.setFixedWidth(80)
         self.goal_input.setValidator(QDoubleValidator(1, 999, 0))
-        self.goal_input.editingFinished.connect(lambda: [ setattr(self, 'nutrition_goal', float(self.goal_input.text())), self.load_data()])
-        stats.addWidget(self.goal_input)
+        self.goal_input.setStyleSheet("background: #333; color: white;")
+        self.goal_input.editingFinished.connect(self.update_goal)
+        goal_layout.addWidget(self.goal_input)
+        goal_layout.addWidget(QLabel("grams"))
+        stats.addLayout(goal_layout)
 
         # Charts
         chart_layout = QHBoxLayout()
@@ -304,9 +398,9 @@ class KittenTracker(QMainWindow):
         self.date_input = QDateEdit(calendarPopup=True)
         self.date_input.setDate(QDate.currentDate())
         self.weight_input = QLineEdit(placeholderText="Weight")
-        self.weight_input.setValidator(QDoubleValidator(0.1, 99.9, 2))
+        self.weight_input.setValidator(QDoubleValidator(0.1, 50.0, 2))
         self.notes_input = QLineEdit(placeholderText="Notes")
-        self.date_input.setMaximumDate(QDate.currentDate())  # Prevent future dates
+        self.date_input.setMaximumDate(QDate.currentDate())
         self.add_weight_btn = QPushButton("➕ Add Entry", clicked=self.add_weight)
         for w in [self.date_input, self.weight_input, self.notes_input, self.add_weight_btn]:
             form.addWidget(w)
@@ -324,7 +418,7 @@ class KittenTracker(QMainWindow):
         self.meal_type.addItems(["Breakfast 🍳", "Lunch 🥩", "Dinner 🍗", "Snack 🥛"])
         self.food_input = QLineEdit(placeholderText="Food item")
         self.amount_input = QLineEdit(placeholderText="Grams")
-        self.amount_input.setValidator(QDoubleValidator(1, 9999, 1))
+        self.amount_input.setValidator(QDoubleValidator(1.0, 1000.0, 1))
         self.log_meal_btn = QPushButton("📝 Log Meal", clicked=self.log_meal)
         for w in [self.meal_type, self.food_input, self.amount_input, self.log_meal_btn]:
             form.addWidget(w)
@@ -337,19 +431,24 @@ class KittenTracker(QMainWindow):
 
         # Animal Selection
         self.animal_combo = QComboBox()
-        self.animal_combo.currentIndexChanged.connect(self.load_data)  # Reload data when animal changes
+        self.animal_combo.currentIndexChanged.connect(self.update_meal_types)
         self.add_animal_btn = QPushButton("➕ New Animal", clicked=self.add_animal)
 
-        # Status Bar (FIXED ORDER)
-        self.unit_btn = QPushButton("Switch to lbs", clicked=self.toggle_units)  # 👈 Create first
-        self.export_btn = QPushButton("💾 Export CSV", clicked=self.export_data)  # 👈 Then this
-
-        status = self.statusBar()
+        # Status Bar - CORRECTED SECTION
+        status = self.statusBar()  # Initialize FIRST
+        
+        # Create buttons
+        self.unit_btn = QPushButton("Switch to lbs", clicked=self.toggle_units)
+        self.backup_btn = QPushButton("💾 Backup", clicked=self.db.create_backup)
+        self.export_btn = QPushButton("💾 Export CSV", clicked=self.export_data)
+        
+        # Add widgets in order
         status.addPermanentWidget(QLabel("Current Animal:"))
         status.addPermanentWidget(self.animal_combo)
         status.addPermanentWidget(self.add_animal_btn)
-        status.addPermanentWidget(self.unit_btn)  # 👈 Now exists
-        status.addPermanentWidget(self.export_btn)  # 👈 Now exists
+        status.addPermanentWidget(self.unit_btn)
+        status.addPermanentWidget(self.export_btn)
+        status.addPermanentWidget(self.backup_btn)
 
         # Developer menu
         dev_menu = self.menuBar().addMenu("Developer")
@@ -361,6 +460,13 @@ class KittenTracker(QMainWindow):
             self.setWindowIcon(self.generate_random_icon()),
             self.setWindowTitle(self.random_window_title())
         ])
+
+    def update_goal(self):
+        try:
+            self.nutrition_goal = float(self.goal_input.text())
+            self.load_data()
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Goal", "Please enter a valid number")
 
     def _create_table(self, headers):
         table = QTableWidget()
@@ -379,77 +485,99 @@ class KittenTracker(QMainWindow):
         return card
 
     def load_data(self):
-        # Get currently selected animal
         animal_id = self.current_animal_id()
-        if not animal_id:
-            QMessageBox.warning(self, "Error", "Please select an animal first!")
-            return
+        
+        # Freeze UI during updates
+        self.weight_table.setUpdatesEnabled(False)
+        self.diet_table.setUpdatesEnabled(False)
+        
+        try:
+            # Clear previous data
+            self.weight_table.setRowCount(0)
+            self.diet_table.setRowCount(0)
 
-        # Clear previous data
+            if not animal_id:
+                self._show_empty_state()
+                return
+
+            # Load weight data
+            weight_data = self.db.get_weight_data(animal_id)
+            for date, weight, notes in weight_data:
+                row = self.weight_table.rowCount()
+                self.weight_table.insertRow(row)
+                self.weight_table.setItem(row, 0, DateTimeTableWidgetItem(date))
+                self.weight_table.setItem(row, 1, QTableWidgetItem(f"{weight:.2f}"))
+                self.weight_table.setItem(row, 2, QTableWidgetItem(notes))
+
+            # Load diet logs
+            diet_logs = self.db.get_diet_logs(animal_id)
+            for timestamp, meal_type, food, amount in diet_logs:
+                row = self.diet_table.rowCount()
+                self.diet_table.insertRow(row)
+                self.diet_table.setItem(row, 0, DateTimeTableWidgetItem(timestamp))
+                self.diet_table.setItem(row, 1, QTableWidgetItem(meal_type))
+                self.diet_table.setItem(row, 2, QTableWidgetItem(food))
+                self.diet_table.setItem(row, 3, QTableWidgetItem(f"{amount:.1f} g"))
+
+            # Update charts
+            self.growth_chart.chart().update_chart(weight_data, self.unit)
+            nutrition_data = self.db.get_daily_nutrition(animal_id)
+            self.nutrition_chart.chart().update_chart(nutrition_data, self.nutrition_goal)
+
+            # Update stats
+            if weight_data:
+                current_weight = weight_data[-1][1] * (2.20462 if self.unit == 'lbs' else 1)
+                self.current_weight.layout().itemAt(1).widget().setText(f"{current_weight:.2f} {self.unit}")
+                
+                if len(weight_data) > 7:
+                    weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) * (2.20462 if self.unit == 'lbs' else 1)
+                    self.weekly_gain.layout().itemAt(1).widget().setText(f"{weekly_gain:+.2f} {self.unit}")
+
+
+            # Update age
+            animal_info = self.db.conn.cursor().execute(
+                "SELECT birthdate FROM animals WHERE id=?", (animal_id,)
+            ).fetchone()
+            
+            if animal_info and animal_info[0]:
+                try:
+                    birthdate = QDate.fromString(animal_info[0], "yyyy-MM-dd")
+                    today = QDate.currentDate()
+                    age_days = birthdate.daysTo(today)
+                    years = age_days // 365
+                    days = age_days % 365
+                    age_text = f"{years}y {days}d" if years > 0 else f"{days}d"
+                    self.age_card.layout().itemAt(1).widget().setText(age_text)
+                except:
+                    self.age_card.layout().itemAt(1).widget().setText("N/A")
+                    
+        finally:
+            self.weight_table.setUpdatesEnabled(True)
+            self.diet_table.setUpdatesEnabled(True)
+            self.weight_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+            self.diet_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)    
+
+    def _show_empty_state(self):
+        # Clear UI elements
         self.weight_table.setRowCount(0)
         self.diet_table.setRowCount(0)
-
-        # Load weight data
-        weight_data = self.db.get_weight_data(animal_id)
-        for row in weight_data:
-            self.weight_table.insertRow(self.weight_table.rowCount())
-            for col, val in enumerate(row):
-                self.weight_table.setItem(self.weight_table.rowCount()-1, col, QTableWidgetItem(str(val)))
-
-        # Load diet data
-        self.diet_table.setSortingEnabled(False)  # Disable during update
-        diet_logs = self.db.get_diet_logs(animal_id)
-        for row in diet_logs:
-            self.diet_table.insertRow(self.diet_table.rowCount())
-            for col, val in enumerate(row):
-                if col == 0:  # Timestamp column
-                    item = DateTimeTableWidgetItem(str(val))
-                else:
-                    item = QTableWidgetItem(str(val))
-                self.diet_table.setItem(self.diet_table.rowCount()-1, col, item)
-
-        # Enable sorting and set default order
-        self.diet_table.setSortingEnabled(True)
-        if diet_logs:
-            self.diet_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
-
-        # Update charts
-        self.growth_chart.chart().update_chart(weight_data, self.unit)
-        self.nutrition_chart.chart().update_chart(
-            self.db.get_daily_nutrition(animal_id), 
-            self.nutrition_goal
-        )
-
-        # Update stats cards
-        if weight_data:
-            current_weight = weight_data[-1][1] * (2.20462 if self.unit == 'lbs' else 1)
-            self.current_weight.layout().itemAt(1).widget().setText(f"{current_weight:.2f} {self.unit}")
-            
-            if len(weight_data) > 7:
-                weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) * (2.20462 if self.unit == 'lbs' else 1)
-                self.weekly_gain.layout().itemAt(1).widget().setText(f"{weekly_gain:+.2f} {self.unit}")
-
-        # Age calculation
-        animal_info = self.db.conn.cursor().execute(
-            "SELECT birthdate FROM animals WHERE id=?", (animal_id,)
-        ).fetchone()
         
-        if animal_info and animal_info[0]:
-            try:
-                birthdate = QDate.fromString(animal_info[0], "yyyy-MM-dd")
-                today = QDate.currentDate()
-                age_days = birthdate.daysTo(today)
-                
-                years = age_days // 365
-                days = age_days % 365
-                age_text = f"{years}y {days}d" if years > 0 else f"{days}d"
-                self.age_card.layout().itemAt(1).widget().setText(age_text)
-            except:
-                self.age_card.layout().itemAt(1).widget().setText("N/A")
-        else:
-            self.age_card.layout().itemAt(1).widget().setText("N/A")
+        # Reset stats
+        self.current_weight.layout().itemAt(1).widget().setText("N/A")
+        self.weekly_gain.layout().itemAt(1).widget().setText("N/A")
+        self.age_card.layout().itemAt(1).widget().setText("N/A")
+        
+        # Clear charts
+        self.growth_chart.chart().update_chart([], self.unit)
+        self.nutrition_chart.chart().update_chart([], self.nutrition_goal)
+        
+        QMessageBox.information(self, "No Animal", 
+            "Please select or add an animal to continue")
 
     def toggle_units(self):
+        if not self.current_animal_id():
+            QMessageBox.warning(self, "Error", "Please select an animal first!")
+            return
         self.unit = 'lbs' if self.unit == 'kg' else 'kg'
         self.unit_btn.setText(f"Switch to {'kg' if self.unit == 'lbs' else 'lbs'}")
         self.load_data()
@@ -459,10 +587,15 @@ class KittenTracker(QMainWindow):
         if not animal_id:
             QMessageBox.warning(self, "Error", "Select an animal first!")
             return
+        if self.date_input.date() > QDate.currentDate():
+            QMessageBox.warning(self, "Invalid Date", 
+                "Cannot enter future dates")
+            return    
         date = self.date_input.date().toString("yyyy-MM-dd")
         try:
             weight = float(self.weight_input.text())
-            if weight <= 0: return
+            if not (0.1 <= weight <= 50):  # Reasonable weight range
+                raise ValueError
             if self.db.add_weight(animal_id, date, weight, self.notes_input.text()):
                 self.load_data()
                 self.weight_input.clear()
@@ -501,11 +634,18 @@ class KittenTracker(QMainWindow):
         dialog.setLayout(layout)
     
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            name = name_input.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Invalid Name", "Please enter a name for the animal")
+                return
             self.db._exec(
                 "INSERT INTO animals (name, animal_type, birthdate) VALUES (?, ?, ?)",
                 (name_input.text(), type_input.currentText(), birthdate_input.date().toString("yyyy-MM-dd"))
             )
             self._refresh_animal_list()
+            new_index = self.animal_combo.findText(name_input.text())
+            if new_index >= 0:
+                self.animal_combo.setCurrentIndex(new_index)
 
     def _refresh_animal_list(self):
         """Update animal dropdown list"""
@@ -530,7 +670,8 @@ class KittenTracker(QMainWindow):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             amount = float(self.amount_input.text())
-            if amount <= 0: return
+            if not (1 <= amount <= 1000):  # 1g to 1kg range
+                raise ValueError
             if self.db.add_meal(
                 animal_id,  # 👈 Added animal ID
                 timestamp, 
