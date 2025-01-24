@@ -8,7 +8,7 @@ import sqlite3
 import platform
 from pathlib import Path
 from datetime import datetime, timedelta
-from PyQt6.QtCore import Qt, QDateTime, QDate, QPoint, QTimer
+from PyQt6.QtCore import Qt, QDateTime, QDate, QPoint, QTimer, QSettings
 from PyQt6.QtGui import (
     QColor, QDoubleValidator, QPainter, QPen, 
     QPixmap, QPolygon, QIcon, QCursor
@@ -24,6 +24,8 @@ from PyQt6.QtCharts import (
     QValueAxis, QBarSeries, QBarSet, QBarCategoryAxis, QScatterSeries
 )
 
+
+
 # ================= TABLE ITEMS =================
 class DateTimeTableWidgetItem(QTableWidgetItem):
     def __init__(self, text):
@@ -36,7 +38,7 @@ class DateTimeTableWidgetItem(QTableWidgetItem):
         return self.sort_value < other.sort_value
 
 
-# ================= DATABASE =================
+
 # ================= DATABASE =================
 class KittenDatabase:
     def __init__(self, production=True):
@@ -99,6 +101,7 @@ class KittenDatabase:
                 timestamp DATETIME NOT NULL,
                 meal_type TEXT,
                 food_item TEXT,
+                brand TEXT,
                 amount REAL,
                 notes TEXT
             )
@@ -122,16 +125,21 @@ class KittenDatabase:
     def _migrate_schema(self):
         cursor = self.conn.execute("PRAGMA table_info(diet_logs)")
         columns = [col[1] for col in cursor.fetchall()]
+
         if 'notes' not in columns:
             self._exec("ALTER TABLE diet_logs ADD COLUMN notes TEXT")
+
+        if 'brand' not in columns:
+            self._exec("ALTER TABLE diet_logs ADD COLUMN brand TEXT")
 
     def get_data_folder(self):
         return self.db_path.parent
 
-    def add_meal(self, animal_id, timestamp, meal_type, food, amount, notes=""):
+    def add_meal(self, animal_id, timestamp, meal_type, food, brand, amount, notes=""):
         return self._exec(
-            "INSERT INTO diet_logs (animal_id, timestamp, meal_type, food_item, amount, notes) VALUES (?, ?, ?, ?, ?, ?)",
-            (animal_id, timestamp, meal_type, food, amount, notes)
+            "INSERT INTO diet_logs (animal_id, timestamp, meal_type, food_item, brand, amount, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (animal_id, timestamp, meal_type, food, brand, amount, notes)
         )
 
     def add_weight(self, animal_id, date, weight, notes=""):
@@ -162,7 +170,8 @@ class KittenDatabase:
     def get_diet_logs(self, animal_id):
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT timestamp, meal_type, food_item, amount, notes FROM diet_logs WHERE animal_id=? ORDER BY timestamp",
+            "SELECT timestamp, meal_type, food_item, brand, amount, notes "
+            "FROM diet_logs WHERE animal_id=? ORDER BY timestamp",
             (animal_id,)
         )
         return cursor.fetchall()
@@ -180,14 +189,34 @@ class KittenDatabase:
             import shutil
             shutil.copy(self.db_path, backup_path)
             self.conn = sqlite3.connect(self.db_path)
-            QMessageBox.information(None, "Success", f"Backup created: {backup_path.name}")
+
+            # Instead of a plain info box, show "Open Folder" or "OK"
+            box = QMessageBox()
+            box.setWindowTitle("Backup Created")
+            box.setText(f"Backup created: {backup_path.name}")
+            box.setIcon(QMessageBox.Icon.Information)
+
+            open_folder = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+
+            box.exec()
+
+            if box.clickedButton() == open_folder:
+                # Attempt to open the backups folder
+                if platform.system() == "Windows":
+                    os.startfile(self.backup_dir)
+                elif platform.system() == "Darwin":
+                    subprocess.run(["open", self.backup_dir])
+                else:
+                    subprocess.run(["xdg-open", self.backup_dir])
+
         except Exception as e:
             QMessageBox.critical(None, "Backup Failed", f"Error: {str(e)}")
 
 
 
 
-# ================= CHARTS =================
+
 # ================= CHARTS =================
 class HealthCorrelationChart(QChart):
     def __init__(self):
@@ -275,6 +304,356 @@ class HealthCorrelationChart(QChart):
             correlation = np.corrcoef(x_vals, y_vals)[0, 1]
             self.setTitle(f"Nutrition vs Weight Change (r = {correlation:.2f})")
 
+class MedicationTab(QWidget):
+    def __init__(self, db):
+        """
+        db is your existing KittenDatabase instance
+        """
+        super().__init__()
+        self.db = db
+        self._ensure_table_exists()
+        self.setStyleSheet("background: #1E1E1E; color: white;")
+        self.layout = QVBoxLayout(self)
+
+        # Title
+        title_label = QLabel("Medication Manager")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        self.layout.addWidget(title_label)
+
+        # Animal picker
+        animal_layout = QHBoxLayout()
+        animal_layout.addWidget(QLabel("Animal:"))
+        self.animal_combo = QComboBox()
+        animal_layout.addWidget(self.animal_combo)
+        animal_layout.addStretch()
+        self.layout.addLayout(animal_layout)
+
+        # Form to add new medication
+        form_layout = QHBoxLayout()
+        self.med_name_input = QLineEdit()
+        self.med_name_input.setPlaceholderText("Medication Name")
+        self.med_name_input.setStyleSheet("background: #333; color: white;")
+
+        self.start_date_input = QDateEdit(calendarPopup=True)
+        self.start_date_input.setDate(QDate.currentDate())
+        self.start_date_input.setStyleSheet("background: #333; color: white;")
+
+        self.frequency_input = QLineEdit()
+        self.frequency_input.setPlaceholderText("Frequency (e.g. daily)")
+        self.frequency_input.setStyleSheet("background: #333; color: white;")
+
+        self.notes_input = QLineEdit()
+        self.notes_input.setPlaceholderText("Notes")
+        self.notes_input.setStyleSheet("background: #333; color: white;")
+
+        self.add_button = QPushButton("Add Medication")
+        self.add_button.setStyleSheet("background: #4CAF50; color: white;")
+        self.add_button.clicked.connect(self.add_medication)
+
+        form_layout.addWidget(self.med_name_input)
+        form_layout.addWidget(self.start_date_input)
+        form_layout.addWidget(self.frequency_input)
+        form_layout.addWidget(self.notes_input)
+        form_layout.addWidget(self.add_button)
+        self.layout.addLayout(form_layout)
+
+        # Table to display medications
+        self.med_table = QTableWidget()
+        self.med_table.setColumnCount(5)
+        self.med_table.setHorizontalHeaderLabels(["Name", "Start Date", "Frequency", "Notes", "Actions"])
+        self.med_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.med_table.setStyleSheet("background: #2E2E2E;")
+        self.med_table.setSortingEnabled(False)
+        self.layout.addWidget(self.med_table)
+
+        # Populate animal combo & signals
+        self.refresh_animals()
+        self.animal_combo.currentIndexChanged.connect(self.load_medications)
+
+    def _ensure_table_exists(self):
+        """
+        Creates the 'medications' table if it does not exist.
+        """
+        create_query = """
+            CREATE TABLE IF NOT EXISTS medications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                animal_id INTEGER REFERENCES animals(id) ON DELETE CASCADE,
+                med_name TEXT NOT NULL,
+                start_date DATE NOT NULL,
+                frequency TEXT,
+                notes TEXT
+            )
+        """
+        self.db._exec(create_query)
+
+    def refresh_animals(self):
+        self.animal_combo.clear()
+        rows = self.db.conn.cursor().execute("SELECT id, name FROM animals").fetchall()
+        for animal_id, name in rows:
+            self.animal_combo.addItem(name, animal_id)
+        if rows:
+            self.animal_combo.setCurrentIndex(0)
+            self.load_medications()
+
+    def current_animal_id(self):
+        if self.animal_combo.currentIndex() == -1:
+            return None
+        return self.animal_combo.currentData()
+
+    def add_medication(self):
+        """
+        Inserts a new medication record for the currently selected animal.
+        """
+        animal_id = self.current_animal_id()
+        if not animal_id:
+            QMessageBox.warning(self, "No Animal", "Please select an animal first.")
+            return
+
+        med_name = self.med_name_input.text().strip()
+        start_date = self.start_date_input.date().toString("yyyy-MM-dd")
+        frequency = self.frequency_input.text().strip()
+        notes = self.notes_input.text().strip()
+
+        if not med_name:
+            QMessageBox.warning(self, "Invalid Input", "Medication name cannot be empty.")
+            return
+
+        insert_query = """
+            INSERT INTO medications (animal_id, med_name, start_date, frequency, notes)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        success = self.db._exec(insert_query, (animal_id, med_name, start_date, frequency, notes))
+        if success:
+            self.med_name_input.clear()
+            self.frequency_input.clear()
+            self.notes_input.clear()
+            self.load_medications()
+            QMessageBox.information(self, "Medication Added", "Medication record created successfully!")
+        else:
+            QMessageBox.warning(self, "Error", "Failed to add medication record.")
+
+    def load_medications(self):
+        """
+        Loads medication entries into the table for the selected animal.
+        """
+        animal_id = self.current_animal_id()
+        if not animal_id:
+            self.med_table.setRowCount(0)
+            return
+
+        cursor = self.db.conn.cursor()
+        rows = cursor.execute("""
+            SELECT id, med_name, start_date, frequency, notes
+            FROM medications
+            WHERE animal_id=?
+            ORDER BY start_date DESC
+        """, (animal_id,)).fetchall()
+
+        self.med_table.setRowCount(0)
+        for row_idx, (record_id, med_name, start_date, frequency, notes) in enumerate(rows):
+            self.med_table.insertRow(row_idx)
+
+            self.med_table.setItem(row_idx, 0, QTableWidgetItem(med_name))
+            self.med_table.setItem(row_idx, 1, QTableWidgetItem(str(start_date)))
+            self.med_table.setItem(row_idx, 2, QTableWidgetItem(frequency))
+            self.med_table.setItem(row_idx, 3, QTableWidgetItem(notes))
+
+            # Action cell (delete button)
+            delete_btn = QPushButton("Delete")
+            delete_btn.setStyleSheet("background: #F44336; color: white;")
+            delete_btn.clicked.connect(lambda _, rid=record_id: self.delete_medication(rid))
+
+            cell_widget = QWidget()
+            cell_layout = QHBoxLayout(cell_widget)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.addWidget(delete_btn)
+            cell_layout.addStretch()
+            cell_widget.setLayout(cell_layout)
+
+            self.med_table.setCellWidget(row_idx, 4, cell_widget)
+
+    def delete_medication(self, record_id):
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            "Are you sure you want to delete this medication record?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            query = "DELETE FROM medications WHERE id=?"
+            if self.db._exec(query, (record_id,)):
+                QMessageBox.information(self, "Deleted", "Medication record deleted.")
+                self.load_medications()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to delete record.")
+
+
+class VaccinationTab(QWidget):
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        self._ensure_table_exists()
+        self.setStyleSheet("background: #1E1E1E; color: white;")
+
+        self.layout = QVBoxLayout(self)
+        title_label = QLabel("Vaccination Records")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        self.layout.addWidget(title_label)
+
+        # Animal selection
+        select_layout = QHBoxLayout()
+        select_layout.addWidget(QLabel("Animal:"))
+        self.animal_combo = QComboBox()
+        select_layout.addWidget(self.animal_combo)
+        select_layout.addStretch()
+        self.layout.addLayout(select_layout)
+
+        # Form to add vaccination records
+        form_layout = QHBoxLayout()
+        self.vax_name_input = QLineEdit()
+        self.vax_name_input.setPlaceholderText("Vaccine Name")
+        self.vax_name_input.setStyleSheet("background: #333; color: white;")
+
+        self.date_admin_input = QDateEdit(calendarPopup=True)
+        self.date_admin_input.setDate(QDate.currentDate())
+        self.date_admin_input.setStyleSheet("background: #333; color: white;")
+
+        self.date_due_input = QDateEdit(calendarPopup=True)
+        self.date_due_input.setDate(QDate.currentDate().addMonths(6))
+        self.date_due_input.setStyleSheet("background: #333; color: white;")
+
+        self.vax_notes_input = QLineEdit()
+        self.vax_notes_input.setPlaceholderText("Notes")
+        self.vax_notes_input.setStyleSheet("background: #333; color: white;")
+
+        self.add_btn = QPushButton("Add Vaccination")
+        self.add_btn.setStyleSheet("background: #4CAF50; color: white;")
+        self.add_btn.clicked.connect(self.add_vaccination)
+
+        form_layout.addWidget(self.vax_name_input)
+        form_layout.addWidget(self.date_admin_input)
+        form_layout.addWidget(self.date_due_input)
+        form_layout.addWidget(self.vax_notes_input)
+        form_layout.addWidget(self.add_btn)
+        self.layout.addLayout(form_layout)
+
+        # Table for vaccinations
+        self.vax_table = QTableWidget()
+        self.vax_table.setColumnCount(5)
+        self.vax_table.setHorizontalHeaderLabels(["Vaccine", "Date Administered", "Next Due", "Notes", "Actions"])
+        self.vax_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.vax_table.setStyleSheet("background: #2E2E2E;")
+        self.layout.addWidget(self.vax_table)
+
+        # Load animals & signals
+        self.refresh_animals()
+        self.animal_combo.currentIndexChanged.connect(self.load_vaccinations)
+
+    def _ensure_table_exists(self):
+        create_query = """
+            CREATE TABLE IF NOT EXISTS vaccinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                animal_id INTEGER REFERENCES animals(id) ON DELETE CASCADE,
+                vaccine_name TEXT NOT NULL,
+                date_admin DATE NOT NULL,
+                date_due DATE,
+                notes TEXT
+            )
+        """
+        self.db._exec(create_query)
+
+    def refresh_animals(self):
+        self.animal_combo.clear()
+        rows = self.db.conn.cursor().execute("SELECT id, name FROM animals").fetchall()
+        for animal_id, name in rows:
+            self.animal_combo.addItem(name, animal_id)
+        if rows:
+            self.animal_combo.setCurrentIndex(0)
+            self.load_vaccinations()
+
+    def current_animal_id(self):
+        if self.animal_combo.currentIndex() == -1:
+            return None
+        return self.animal_combo.currentData()
+
+    def add_vaccination(self):
+        animal_id = self.current_animal_id()
+        if not animal_id:
+            QMessageBox.warning(self, "No Animal", "Select an animal to add vaccinations.")
+            return
+
+        vax_name = self.vax_name_input.text().strip()
+        date_admin = self.date_admin_input.date().toString("yyyy-MM-dd")
+        date_due = self.date_due_input.date().toString("yyyy-MM-dd")
+        notes = self.vax_notes_input.text().strip()
+
+        if not vax_name:
+            QMessageBox.warning(self, "Error", "Vaccine name cannot be empty.")
+            return
+
+        insert_query = """
+            INSERT INTO vaccinations (animal_id, vaccine_name, date_admin, date_due, notes)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        success = self.db._exec(insert_query, (animal_id, vax_name, date_admin, date_due, notes))
+        if success:
+            self.vax_name_input.clear()
+            self.vax_notes_input.clear()
+            self.load_vaccinations()
+            QMessageBox.information(self, "Vaccination Added", "Vaccine record added!")
+        else:
+            QMessageBox.warning(self, "Error", "Failed to add vaccination record.")
+
+    def load_vaccinations(self):
+        animal_id = self.current_animal_id()
+        if not animal_id:
+            self.vax_table.setRowCount(0)
+            return
+
+        cursor = self.db.conn.cursor()
+        rows = cursor.execute("""
+            SELECT id, vaccine_name, date_admin, date_due, notes
+            FROM vaccinations
+            WHERE animal_id=?
+            ORDER BY date_admin DESC
+        """, (animal_id,)).fetchall()
+
+        self.vax_table.setRowCount(0)
+        for i, (rec_id, name, d_admin, d_due, notes) in enumerate(rows):
+            self.vax_table.insertRow(i)
+
+            self.vax_table.setItem(i, 0, QTableWidgetItem(name))
+            self.vax_table.setItem(i, 1, QTableWidgetItem(d_admin))
+            self.vax_table.setItem(i, 2, QTableWidgetItem(d_due))
+            self.vax_table.setItem(i, 3, QTableWidgetItem(notes))
+
+            # Action cell with delete
+            delete_btn = QPushButton("Delete")
+            delete_btn.setStyleSheet("background: #F44336; color: white;")
+            delete_btn.clicked.connect(lambda _, rid=rec_id: self.delete_vaccination(rid))
+
+            cell_widget = QWidget()
+            cell_layout = QHBoxLayout(cell_widget)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.addWidget(delete_btn)
+            cell_layout.addStretch()
+            cell_widget.setLayout(cell_layout)
+            self.vax_table.setCellWidget(i, 4, cell_widget)
+
+    def delete_vaccination(self, rec_id):
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            "Are you sure you want to delete this vaccination record?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            query = "DELETE FROM vaccinations WHERE id=?"
+            if self.db._exec(query, (rec_id,)):
+                QMessageBox.information(self, "Deleted", "Vaccination record deleted.")
+                self.load_vaccinations()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to delete record.")
 
 
 class GrowthChart(QChart):
@@ -410,8 +789,34 @@ class NutritionChart(QChart):
             self.goal_line.append(len(categories) - 1, goal)
 
 
+class DatabaseResetHelper:
+    def __init__(self, db):
+        """
+        db is your existing KittenDatabase instance
+        """
+        self.db = db
 
-# ================= MAIN APP (PARTIAL) =================
+    def force_recreate_tables(self):
+        """
+        Drops the old tables completely, then recreates them using
+        KittenDatabase._create_tables(). All data is lost!
+        """
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute("DROP TABLE IF EXISTS diet_logs")
+            cursor.execute("DROP TABLE IF EXISTS weight_data")
+            cursor.execute("DROP TABLE IF EXISTS animals")
+            self.db.conn.commit()
+
+            self.db._create_tables()
+            QMessageBox.information(None, "Tables Recreated", 
+                "All tables dropped and recreated successfully!")
+        except Exception as e:
+            self.db.conn.rollback()
+            QMessageBox.critical(None, "Error", f"Failed to recreate tables: {str(e)}")
+
+
+
 # ================= MAIN APP (PARTIAL) =================
 class KittenTracker(QMainWindow):
     def __init__(self):
@@ -421,11 +826,16 @@ class KittenTracker(QMainWindow):
             self.db = KittenDatabase(production=self.production_mode)
             self.unit = 'kg'
             self.nutrition_goal = 80
+
+            self.tab_config_path = self.db.get_data_folder() / "tab_order.json"
+
             self.setup_ui()
             self._refresh_animal_list()
             self.setWindowIcon(self.generate_random_icon())
             self.setWindowTitle(self.random_window_title())
             self._add_database_menu()
+
+            self._load_tab_order()
         except Exception as e:
             QMessageBox.critical(None, "Startup Failed", f"Application failed to start: {str(e)}")
             sys.exit(1)
@@ -437,15 +847,11 @@ class KittenTracker(QMainWindow):
         db_menu.addSeparator()
         db_menu.addAction("Exit", self.close)
 
-        # Developer menu and toggles
         dev_menu = self.menuBar().addMenu("Developer")
-
-        # Make dev-mode toggling optional if you want to switch DB
         self.dev_mode = dev_menu.addAction("Development Mode")
         self.dev_mode.setCheckable(True)
         self.dev_mode.triggered.connect(lambda: self.toggle_dev_mode(self.dev_mode.isChecked()))
 
-        # Randomize UI
         self.randomize_ui = dev_menu.addAction("Randomize UI")
         self.randomize_ui.triggered.connect(lambda: [
             self.setWindowIcon(self.generate_random_icon()),
@@ -525,11 +931,15 @@ class KittenTracker(QMainWindow):
         self.setMinimumSize(1280, 720)
         self.setStyleSheet("background: #1E1E1E; color: white;")
 
-        tabs = QTabWidget()
-        self.setCentralWidget(tabs)
+        self.tabs = QTabWidget()
+        self.tabs.setMovable(True)
+        self.tabs.tabBar().tabMoved.connect(self._on_tab_moved)
+        self.setCentralWidget(self.tabs)
 
-        dash_tab = QWidget()
-        layout = QVBoxLayout(dash_tab)
+        # Dashboard
+        self.dash_tab = QWidget()
+        self.dash_tab.setObjectName("DashboardTab")
+        layout = QVBoxLayout(self.dash_tab)
 
         stats = QHBoxLayout()
         self.current_weight = self._create_card("Current Weight", "N/A", "#4CAF50")
@@ -564,10 +974,12 @@ class KittenTracker(QMainWindow):
 
         layout.addLayout(stats)
         layout.addLayout(chart_layout)
-        tabs.addTab(dash_tab, "📈 Dashboard")
+        self.tabs.addTab(self.dash_tab, "📈 Dashboard")
 
-        weight_tab = QWidget()
-        weight_layout = QVBoxLayout(weight_tab)
+        # Weight tab
+        self.weight_tab = QWidget()
+        self.weight_tab.setObjectName("WeightTab")
+        weight_layout = QVBoxLayout(self.weight_tab)
 
         form = QHBoxLayout()
         self.date_input = QDateEdit(calendarPopup=True)
@@ -584,26 +996,29 @@ class KittenTracker(QMainWindow):
         self.weight_table = self._create_table(["Date", "Weight", "Notes"])
         weight_layout.addLayout(form)
         weight_layout.addWidget(self.weight_table)
-        tabs.addTab(weight_tab, "⚖️ Weight")
+        self.tabs.addTab(self.weight_tab, "⚖️ Weight")
 
-        diet_tab = QWidget()
-        diet_layout = QVBoxLayout(diet_tab)
+        # Meals tab
+        self.diet_tab = QWidget()
+        self.diet_tab.setObjectName("DietTab")
+        diet_layout = QVBoxLayout(self.diet_tab)
 
         form = QHBoxLayout()
         self.meal_type = QComboBox()
         self.meal_type.addItems(["Breakfast 🍳", "Lunch 🥩", "Dinner 🍗", "Snack 🥛"])
         self.food_input = QLineEdit(placeholderText="Food item")
+        self.brand_input = QLineEdit(placeholderText="Brand")
         self.amount_input = QLineEdit(placeholderText="Grams")
         self.amount_input.setValidator(QDoubleValidator(1.0, 1000.0, 1))
         self.log_meal_btn = QPushButton("📝 Log Meal", clicked=self.log_meal)
 
-        for w in [self.meal_type, self.food_input, self.amount_input, self.log_meal_btn]:
+        for w in [self.meal_type, self.food_input, self.brand_input, self.amount_input, self.log_meal_btn]:
             form.addWidget(w)
 
-        self.diet_table = self._create_table(["Timestamp", "Meal Type", "Food", "Amount (g)", "Notes"])
+        self.diet_table = self._create_table(["Timestamp", "Meal Type", "Food", "Brand", "Amount (g)", "Notes"])
         diet_layout.addLayout(form)
         diet_layout.addWidget(self.diet_table)
-        tabs.addTab(diet_tab, "🍴 Meals")
+        self.tabs.addTab(self.diet_tab, "🍴 Meals")
 
         status = self.statusBar()
         self.animal_combo = QComboBox()
@@ -620,12 +1035,58 @@ class KittenTracker(QMainWindow):
         status.addPermanentWidget(self.export_btn)
         status.addPermanentWidget(self.backup_btn)
 
-        # The test-data and clear-data buttons always appear so you can generate anytime:
         self.test_btn = QPushButton("🧪 Generate Test Data", clicked=self.create_test_data)
         self.clear_btn = QPushButton("🗑️ Clear Data", clicked=self.clear_test_data)
         for btn in [self.test_btn, self.clear_btn]:
             btn.setStyleSheet("background: #FFA726; padding: 5px;")
             status.addPermanentWidget(btn)
+
+    def _on_tab_moved(self, old_index, new_index):
+        self._save_tab_order()
+
+    def _save_tab_order(self):
+        import json
+        tab_count = self.tabs.count()
+        order = []
+        for i in range(tab_count):
+            w = self.tabs.widget(i)
+            order.append(w.objectName())
+
+        data = {"tab_order": order}
+        try:
+            with open(self.tab_config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Could not save tab order: {str(e)}")
+
+    def _load_tab_order(self):
+        import json
+        if not self.tab_config_path.exists():
+            return
+        try:
+            with open(self.tab_config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved_order = data.get("tab_order", [])
+        except Exception as e:
+            print(f"Could not load tab order: {str(e)}")
+            return
+
+        name_to_index = {}
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            name_to_index[w.objectName()] = i
+
+        for i, obj_name in enumerate(saved_order):
+            if obj_name not in name_to_index:
+                continue
+            current_index = self.tabs.indexOf(self.tabs.findChild(QWidget, obj_name))
+            if current_index != -1 and current_index != i:
+                self.tabs.tabBar().moveTab(current_index, i)
+
+            name_to_index.clear()
+            for j in range(self.tabs.count()):
+                w = self.tabs.widget(j)
+                name_to_index[w.objectName()] = j
 
     def _create_table(self, headers):
         table = QTableWidget()
@@ -666,14 +1127,16 @@ class KittenTracker(QMainWindow):
                 self.weight_table.setItem(row, 2, QTableWidgetItem(notes))
 
             diet_logs = self.db.get_diet_logs(animal_id)
-            for timestamp, meal_type, food, amount, notes in diet_logs:
+            for record in diet_logs:
+                # record => (timestamp, meal_type, food_item, brand, amount, notes)
                 row = self.diet_table.rowCount()
                 self.diet_table.insertRow(row)
-                self.diet_table.setItem(row, 0, DateTimeTableWidgetItem(timestamp))
-                self.diet_table.setItem(row, 1, QTableWidgetItem(meal_type))
-                self.diet_table.setItem(row, 2, QTableWidgetItem(food))
-                self.diet_table.setItem(row, 3, QTableWidgetItem(f"{amount:.1f} g"))
-                self.diet_table.setItem(row, 4, QTableWidgetItem(notes))
+                self.diet_table.setItem(row, 0, DateTimeTableWidgetItem(record[0]))
+                self.diet_table.setItem(row, 1, QTableWidgetItem(record[1]))
+                self.diet_table.setItem(row, 2, QTableWidgetItem(record[2]))
+                self.diet_table.setItem(row, 3, QTableWidgetItem(record[3]))
+                self.diet_table.setItem(row, 4, QTableWidgetItem(f"{record[4]:.1f} g"))
+                self.diet_table.setItem(row, 5, QTableWidgetItem(record[5]))
 
             self.growth_chart.chart().update_chart(weight_data, self.unit)
             nutrition_data = self.db.get_daily_nutrition(animal_id)
@@ -685,8 +1148,8 @@ class KittenTracker(QMainWindow):
                 self.current_weight.layout().itemAt(1).widget().setText(f"{current_weight:.2f} {self.unit}")
 
                 if len(weight_data) > 7:
-                    weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) * \
-                                  (2.20462 if self.unit == 'lbs' else 1)
+                    weekly_gain = (weight_data[-1][1] - weight_data[-8][1]) \
+                                  * (2.20462 if self.unit == 'lbs' else 1)
                     self.weekly_gain.layout().itemAt(1).widget().setText(f"{weekly_gain:+.2f} {self.unit}")
 
             animal_info = self.db.conn.cursor().execute(
@@ -755,11 +1218,13 @@ class KittenTracker(QMainWindow):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             meal_type = self.meal_type.currentText()
             food = self.food_input.text().strip() or "Generic Food"
+            brand = self.brand_input.text().strip() or "No Brand"
             amount = float(self.amount_input.text())
 
-            if self.db.add_meal(animal_id, timestamp, meal_type, food, amount):
+            if self.db.add_meal(animal_id, timestamp, meal_type, food, brand, amount):
                 self.load_data()
                 self.food_input.clear()
+                self.brand_input.clear()
                 self.amount_input.clear()
                 self._flash_table_row(self.diet_table, 0)
             else:
@@ -838,11 +1303,13 @@ class KittenTracker(QMainWindow):
         animal_id = self.current_animal_id()
         if not animal_id:
             return
-
-        animal_type = self.db.conn.cursor().execute(
+        row = self.db.conn.cursor().execute(
             "SELECT animal_type FROM animals WHERE id=?", (animal_id,)
-        ).fetchone()[0]
+        ).fetchone()
+        if not row:
+            return
 
+        animal_type = row[0]
         self.meal_type.clear()
         if animal_type == "Cat":
             self.meal_type.addItems(["Wet Food 🐟", "Dry Food 🥣", "Treat 🍗", "Medicine 💊"])
@@ -852,10 +1319,6 @@ class KittenTracker(QMainWindow):
             self.meal_type.addItems(["Regular Meal", "Special Diet", "Vitamin", "Custom Feed"])
 
     def toggle_dev_mode(self, enabled):
-        """
-        Optional: Switches the database between 'production' and 'dev'.
-        You can ignore this if you want to keep using the same DB.
-        """
         if enabled:
             QMessageBox.information(self, "Dev Mode On", "Now using dev DB.")
             self.db.conn.close()
@@ -867,10 +1330,6 @@ class KittenTracker(QMainWindow):
         self._refresh_animal_list()
 
     def create_test_data(self):
-        """
-        Creates 1-year test data for the currently open DB (dev or production).
-        Data should appear in both Weight and Meals tabs.
-        """
         try:
             self.db.clear_test_data()
             cursor = self.db.conn.cursor()
@@ -883,13 +1342,12 @@ class KittenTracker(QMainWindow):
             animal_id = cursor.lastrowid
 
             base_date = datetime.now() - timedelta(days=365)
-            max_weight = 4.2   # adult cat in kg
+            max_weight = 4.2
             growth_rate = 0.015
             midpoint_day = 180
             seasonal_amplitude = 0.15
             weekly_noise = 0.03
 
-            # Insert daily weight data
             for day in range(365):
                 logistic = max_weight / (1 + np.exp(-growth_rate * (day - midpoint_day)))
                 seasonal = 1 + seasonal_amplitude * np.sin(day / 58)
@@ -897,11 +1355,9 @@ class KittenTracker(QMainWindow):
                 noise = 1 + random.uniform(-weekly_noise, weekly_noise)
                 weight = logistic * seasonal * weekly * noise
                 date_str = (base_date + timedelta(days=day)).strftime("%Y-%m-%d")
-
                 note = self._generate_weight_note(day, weight)
                 self.db.add_weight(animal_id, date_str, round(weight, 3), note)
 
-            # Insert meal logs
             meal_types = {
                 "Morning Meal 🍳": {
                     "times": (7, 9),
@@ -979,26 +1435,23 @@ class KittenTracker(QMainWindow):
                     food, base_amount, brand = random.choice(details["foods"])
                     amount_variation = random.gauss(1, 0.1)
                     amount = round(base_amount * amount_variation, 1)
-
-                    note_parts = [
-                        random.choice(details["notes"]),
-                        f"Brand: {brand}",
-                        f"Weather: {self._random_weather()}"
-                    ]
+                    note_parts = [random.choice(details["notes"]), f"Weather: {self._random_weather()}"]
                     if special_note:
                         note_parts.append(special_note)
+                    final_notes = " | ".join(note_parts)
 
-                    note = " | ".join(note_parts)
                     timestamp = current_date.replace(hour=hour, minute=minute).strftime("%Y-%m-%d %H:%M:%S")
-                    self.db.add_meal(animal_id, timestamp, meal_name, food, amount, notes=note)
+                    self.db.add_meal(
+                        animal_id, timestamp, meal_name, food, brand, amount, notes=final_notes
+                    )
 
-                # Birthday
                 if date_str == "2023-06-15":
                     self.db.add_meal(
                         animal_id,
                         current_date.replace(hour=12, minute=0).strftime("%Y-%m-%d %H:%M:%S"),
                         "Birthday Feast 🎂",
                         "Special Salmon Cake",
+                        "Homemade",
                         80,
                         "1st birthday celebration! 🥳"
                     )
@@ -1050,16 +1503,44 @@ class KittenTracker(QMainWindow):
         QMessageBox.information(self, "Data Cleared", "All test data was removed from the current DB.")
 
     def export_data(self):
+        """
+        Exports weight data to CSV, then shows a custom message box with "Open Folder" or "OK."
+        """
         animal_id = self.current_animal_id()
         if not animal_id:
             return
 
+        # We'll save the CSV in the same folder as the DB, just like before.
         filename = f"weight_data_{animal_id}.csv"
-        with open(filename, 'w', newline='') as f:
+        csv_path = self.db.get_data_folder() / filename
+
+        with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Date', 'Weight', 'Notes'])
             writer.writerows(self.db.get_weight_data(animal_id))
-        QMessageBox.information(self, "Export Complete", f"Data saved to {filename}")
+
+        box = QMessageBox()
+        box.setWindowTitle("Export Complete")
+        box.setText(f"Data saved to {filename}")
+        box.setIcon(QMessageBox.Icon.Information)
+
+        open_folder = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+
+        box.exec()
+
+        if box.clickedButton() == open_folder:
+            # Attempt to open the folder containing the CSV
+            folder = self.db.get_data_folder()
+            if platform.system() == "Windows":
+                os.startfile(folder)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", folder])
+            else:
+                subprocess.run(["xdg-open", folder])
+
+
+
 
 
 
