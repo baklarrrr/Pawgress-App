@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import sys
 import sqlite3
 from PyQt6.QtWidgets import (
