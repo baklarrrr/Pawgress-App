@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QSpinBox, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 DB_FILE = 'mbworld_tasks.db'
 
@@ -54,6 +55,15 @@ class TaskDatabase:
         return c.fetchall()
 
 
+def color_for_priority(priority: int) -> QColor:
+    """Return a background color for a given priority."""
+    if priority <= 3:
+        return QColor("#ffcccc")  # high priority
+    if priority <= 6:
+        return QColor("#fff2cc")  # medium priority
+    return QColor("#d9ead3")  # low priority
+
+
 class AddTaskDialog(QDialog):
     def __init__(self):
         super().__init__()
@@ -91,18 +101,23 @@ class MBWorldTracker(QWidget):
         self.todo_table.setColumnCount(2)
         self.todo_table.setHorizontalHeaderLabels(["Task", "Priority"])
         self.todo_table.horizontalHeader().setStretchLastSection(True)
+        self.todo_table.setAccessibleName("To Do Table")
 
         # Right: Done
         self.done_table = QTableWidget()
         self.done_table.setColumnCount(2)
         self.done_table.setHorizontalHeaderLabels(["Task", "Priority"])
         self.done_table.horizontalHeader().setStretchLastSection(True)
+        self.done_table.setAccessibleName("Completed Table")
 
         # Middle buttons
         btn_layout = QVBoxLayout()
         self.add_btn = QPushButton("Add ->")
+        self.add_btn.setAccessibleName("Add Task")
         self.done_btn = QPushButton("Mark Done ->")
+        self.done_btn.setAccessibleName("Mark Done")
         self.remove_btn = QPushButton("Delete")
+        self.remove_btn.setAccessibleName("Delete Task")
 
         self.add_btn.clicked.connect(self.add_task)
         self.done_btn.clicked.connect(self.mark_done)
@@ -133,6 +148,11 @@ class MBWorldTracker(QWidget):
             item_desc = QTableWidgetItem(desc)
             item_desc.setData(Qt.ItemDataRole.UserRole, task_id)
             item_prio = QTableWidgetItem(str(prio))
+
+            color = color_for_priority(prio)
+            item_desc.setBackground(color)
+            item_prio.setBackground(color)
+
             table.setItem(row, 0, item_desc)
             table.setItem(row, 1, item_prio)
         table.sortItems(1)
