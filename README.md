@@ -28,3 +28,24 @@ The main application code lives in `pawgress.py`.
 
 `run_app.py` performs a `git pull` on startup so the application stays in sync
 with the repository whenever it is launched.
+
+## Building a Standalone Executable
+
+You can package the application as a single executable on any platform using
+[PyInstaller](https://pyinstaller.org/). First install PyInstaller:
+
+```bash
+pip install pyinstaller
+```
+
+Then run the provided `build.py` script which wraps the PyInstaller command:
+
+```bash
+python build.py
+```
+
+After completion, the standalone binary will be available inside the `dist`
+folder. Run the binary directly on your platform (Windows, macOS or Linux) with
+the same interface and functionality as running `python run_app.py`.
+
+Note that executables must be built separately on each operating system.

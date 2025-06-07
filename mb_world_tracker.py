@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QSpinBox, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 DB_FILE = 'mbworld_tasks.db'
 
@@ -124,15 +125,28 @@ class MBWorldTracker(QWidget):
     def load_tasks(self):
         todo = self.db.fetch_tasks(done=False)
         done = self.db.fetch_tasks(done=True)
-        self.populate_table(self.todo_table, todo)
-        self.populate_table(self.done_table, done)
+        self.populate_table(self.todo_table, todo, done=False)
+        self.populate_table(self.done_table, done, done=True)
 
-    def populate_table(self, table, data):
+    def populate_table(self, table, data, done=False):
         table.setRowCount(len(data))
         for row, (task_id, desc, prio) in enumerate(data):
             item_desc = QTableWidgetItem(desc)
             item_desc.setData(Qt.ItemDataRole.UserRole, task_id)
             item_prio = QTableWidgetItem(str(prio))
+
+            if done:
+                color = QColor("#e0e0e0")
+            else:
+                if prio <= 3:
+                    color = QColor("#ffcccc")
+                elif prio <= 6:
+                    color = QColor("#fff5cc")
+                else:
+                    color = QColor("#ccffcc")
+            item_desc.setBackground(color)
+            item_prio.setBackground(color)
+
             table.setItem(row, 0, item_desc)
             table.setItem(row, 1, item_prio)
         table.sortItems(1)
